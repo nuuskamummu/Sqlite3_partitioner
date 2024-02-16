@@ -1,24 +1,34 @@
 pub mod operations;
 use operations::create::*;
+use serde::{Deserialize, Serialize};
 use sqlite3_ext::{
     ffi::SQLITE_NOTFOUND,
+    query::ToParam,
     sqlite3_ext_main, sqlite3_ext_vtab,
     vtab::{
-        ChangeInfo, ChangeType, ColumnContext, CreateVTab, UpdateVTab, VTab, VTabConnection,
-        VTabCursor,
+        ChangeInfo, ChangeType, ColumnContext, ConstraintOp, CreateVTab, IndexInfoConstraint,
+        UpdateVTab, VTab, VTabConnection, VTabCursor,
     },
     Connection, FallibleIterator, FallibleIteratorMut, FromValue, Result as ExtResult, Value,
     ValueRef,
 };
 
-use std::ops::Bound::{self};
+use std::{
+    collections::HashMap,
+    default,
+    fmt::Display,
+    ops::{
+        Bound::{self},
+        Deref, DerefMut,
+    },
+};
 
 use crate::{
     utils::{
-        aggregate_conditions_to_ranges, calculate_bucket, parse_conditions, resolve_partition_name,
-        validate_and_map_columns,
+        aggregate_conditions_to_ranges, calculate_bucket, resolve_partition_name,
+        validate_and_map_columns, Condition,
     },
-    ConstraintOperators, Lookup, PartitionAccessor, RangePartition, Root, Template,
+    ConstraintOpDef, Lookup, PartitionAccessor, RangePartition, Root, Template,
 };
 
 use self::operations::update;
@@ -69,35 +79,102 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
         Ok(self.connection.execute(&sql, params)?)
     }
 }
+#[derive(Serialize, Deserialize, Debug)]
+struct WhereClause {
+    column_name: String,
+    #[serde(with = "ConstraintOpDef")]
+    operator: ConstraintOp,
+    // #[serde(with = "ValueDef")]
+    // right_hand_value: Option<Value>,
+    constraint_index: i32,
+}
+impl WhereClause {
+    fn get_name(&self) -> String {
+        self.column_name.clone()
+    }
+    fn _get_operator(&self) -> ConstraintOp {
+        self.operator
+    }
+    fn _get_constraint_index(&self) -> i32 {
+        self.constraint_index
+    }
+}
+#[derive(Serialize, Deserialize, Debug)]
+struct WhereClauses(HashMap<String, Vec<WhereClause>>);
+impl Deref for WhereClauses {
+    type Target = HashMap<String, Vec<WhereClause>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for WhereClauses {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl FromIterator<(String, Vec<WhereClause>)> for WhereClauses {
+    fn from_iter<T: IntoIterator<Item = (String, Vec<WhereClause>)>>(iter: T) -> Self {
+        let mut data: HashMap<String, Vec<WhereClause>> = HashMap::new();
+
+        for (key, clauses) in iter {
+            for clause in clauses {
+                data.entry(key.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(clause);
+            }
+        }
+
+        WhereClauses(data)
+    }
+}
+impl Display for WhereClause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} {}",
+            self.column_name,
+            ConstraintOpDef::from(self.operator),
+            "?"
+        )
+    }
+}
+
 fn construct_where_clause(
     index_info: &sqlite3_ext::vtab::IndexInfo,
     partition: &RangePartition,
-) -> ExtResult<String> {
-    let partition_column_name = &partition.root.partition_column;
-    let partition_column_constraints = index_info.constraints().filter_map(|constraint| {
-        let column_name = partition.columns[constraint.column() as usize].get_name();
-        if column_name.to_uppercase() == partition_column_name.to_uppercase() && constraint.usable()
-        {
-            Some(constraint)
-        } else {
-            None
-        }
-    });
+) -> ExtResult<WhereClauses> {
+    let mut column_name_map: HashMap<String, Vec<(IndexInfoConstraint, i32)>> = HashMap::new();
+    for (index, constraint) in index_info
+        .constraints()
+        .enumerate()
+        .filter(|(_index, c)| c.usable())
+    {
+        let column_name = partition.columns[constraint.column() as usize]
+            .get_name()
+            .to_owned();
+        column_name_map
+            .entry(column_name)
+            .or_default()
+            .push((constraint, index as i32));
+    }
 
-    let lookup_table_where_clauses: Result<Vec<String>, sqlite3_ext::Error> =
-        partition_column_constraints
-            .map(|constraint| {
-                let bucket_value =
-                    calculate_bucket(&constraint.rhs()?.to_owned()?, partition.interval)?;
-                Ok(format!(
-                    "partition_value {} {}",
-                    ConstraintOperators(constraint.op()),
-                    bucket_value,
-                ))
-            })
-            .collect();
-
-    Ok(lookup_table_where_clauses?.join(" AND "))
+    let where_clauses = column_name_map
+        .iter()
+        .map(|(column_name, constraints)| {
+            let clauses = constraints
+                .iter()
+                .map(|(constraint, index)| WhereClause {
+                    column_name: column_name.into(),
+                    operator: constraint.op(),
+                    constraint_index: *index,
+                })
+                .collect::<Vec<WhereClause>>();
+            ("partition_table".to_string(), clauses)
+        })
+        .collect();
+    Ok(where_clauses)
 }
 impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
     type Aux = ();
@@ -142,11 +219,29 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
                 argv_index += 1;
             }
         }
+        println!("{:#?}", index_info);
         index_info.set_estimated_cost(1.0); // Set a default cost, could be refined.
+        let mut where_clauses = construct_where_clause(index_info, &self.partition)?;
+        let partition_column =
+            where_clauses.get_key_value(&self.partition.get_root().partition_column);
+        let lookup_where_clause = match partition_column {
+            Some((_name, constraints)) => constraints
+                .iter()
+                .map(|constraint| {
+                    let wherec = WhereClause {
+                        column_name: "partition_value".to_string(),
+                        operator: constraint.operator,
+                        constraint_index: constraint.constraint_index,
+                    };
+                    Some(wherec)
+                })
+                .collect::<Option<Vec<WhereClause>>>(),
+            None => None,
+        };
 
-        let where_clause = construct_where_clause(index_info, &self.partition)?;
-        println!("{}", where_clause);
-        index_info.set_index_str(Some(&where_clause))?;
+        lookup_where_clause
+            .and_then(|clause| where_clauses.insert("lookup_table".to_string(), clause));
+        index_info.set_index_str(Some(&ron::to_string(&where_clauses).unwrap()))?;
 
         Ok(())
     }
@@ -154,8 +249,6 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
         Ok(())
     }
 }
-
-// type PartitionColumnConstraint = (&str, )
 
 pub struct RangePartitionCursor<'cursor> {
     rowid: i64,
@@ -171,18 +264,38 @@ impl<'cursor> VTabCursor<'cursor> for RangePartitionCursor<'cursor> {
         idx_str: Option<&str>,
         args: &mut [&mut ValueRef],
     ) -> ExtResult<()> {
-        println!("number of arguments: {}", args.len());
-        let range = parse_conditions(idx_str.unwrap_or(""));
-        let range = aggregate_conditions_to_ranges(range);
-        println!("{}", idx_str.unwrap_or("no idx str"));
-        let partition_column_range: &(Bound<i64>, Bound<i64>) =
-            range.get("partition_value").unwrap_or(&(
-                Bound::Unbounded as Bound<i64>,
-                Bound::Unbounded as Bound<i64>,
-            ));
+        let where_clauses_serialized = idx_str.unwrap_or("");
+        let where_clauses: WhereClauses = ron::from_str(where_clauses_serialized).unwrap();
+        let lookup_where = where_clauses.get("lookup_table");
+        let partition_where = where_clauses.get("partition_table");
 
-        let lower_bound = partition_column_range.0;
-        let upper_bound = partition_column_range.1;
+        let lookup_conditions = match lookup_where {
+            Some(constraints) => constraints
+                .iter()
+                .map(|constraint| {
+                    let value = match args[constraint.constraint_index as usize].to_owned() {
+                        Ok(value) => value,
+                        Err(_err) => return None,
+                    };
+                    Some(Condition {
+                        column: constraint.get_name(),
+                        operator: constraint.operator,
+                        value,
+                    })
+                })
+                .flatten()
+                .collect::<Vec<Condition>>(),
+            None => Vec::new(),
+        };
+
+        let ranges = aggregate_conditions_to_ranges(lookup_conditions);
+        let (lower_bound, upper_bound) = match ranges.get("partition_value") {
+            Some(bounds) => *bounds,
+            None => (
+                Bound::Unbounded as Bound<i64>,
+                Bound::Unbounded as Bound<i64>,
+            ),
+        };
 
         self.partition_tables = self
             .meta_table
@@ -190,15 +303,35 @@ impl<'cursor> VTabCursor<'cursor> for RangePartitionCursor<'cursor> {
             .get_lookup()
             .get_partitions_by_range(self.meta_table.connection, lower_bound, upper_bound)?;
 
+        let mut partition_where_str: String = String::default();
+        if let Some(vec) = partition_where {
+            partition_where_str = format!(
+                "WHERE {}",
+                vec.iter()
+                    .map(|clause| {
+                        format!(
+                            "{} {} {}",
+                            clause.column_name,
+                            ConstraintOpDef::from(clause.operator),
+                            "?"
+                        )
+                    })
+                    .collect::<Vec<String>>()
+                    .join(" AND ")
+            );
+        }
+
         for (_, pair) in self.partition_tables.iter().enumerate() {
             let partition_name = &pair.1;
+            let sql = format!("SELECT * FROM {} {}", partition_name, partition_where_str);
+            let mut stmt = self.meta_table.connection.prepare(&sql)?;
+            for (index, arg) in args.iter_mut().enumerate() {
+                arg.bind_param(&mut stmt, (index + 1) as i32)?;
+            }
+            println!("SQL: {}", sql);
 
-            let sql = format!("SELECT * FROM {}", partition_name);
-
-            let rows = self
-                .meta_table
-                .connection
-                .query(&sql, ())?
+            let rows = stmt
+                .query(())?
                 .map(|row| {
                     let column_count = row.len();
                     let mut columns: Vec<(String, Value)> = Vec::default();

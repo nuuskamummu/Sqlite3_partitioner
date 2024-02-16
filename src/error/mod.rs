@@ -1,5 +1,3 @@
-use std::sync::LockResult;
-
 use sqlite3_ext::ffi::SQLITE_MISMATCH;
 
 #[derive(Debug)]

@@ -2,8 +2,8 @@ use sqlite3_ext::query::{Statement, ToParam};
 use sqlite3_ext::{Connection, FallibleIterator};
 use sqlite3_ext::{FallibleIteratorMut, FromValue, Result};
 use std::collections::BTreeMap;
-use std::ops::{Bound, Deref};
-use std::sync::{LockResult, RwLock, RwLockReadGuard};
+use std::ops::Bound;
+use std::sync::RwLock;
 
 /// A constant representing the postfix appended to the names of lookup tables.
 
@@ -273,10 +273,12 @@ impl Lookup for LookupTable {
 
         // Iterate over query results to update partitions map.
         while let Ok(Some(row)) = results.next() {
-            let partition_value = row[1].get_i64();
-            let partition_table_name = row[0].get_str().to_owned()?;
+            println!("row: {:#?}", row);
+            let partition_value = row[0].get_i64();
+            let partition_table_name = row[1].get_str()?;
             borrowed_partitions.insert(partition_value, partition_table_name.to_string());
         }
+        println!("Sync. Partitions: {:#?}", borrowed_partitions);
         drop(borrowed_partitions);
         Ok(())
     }
@@ -362,9 +364,11 @@ impl Lookup for LookupTable {
             )
         })?;
         let range = borrowed_partitions.range((from, to));
+        println!("{:?}", range);
         let pair = range
             .map(|(key, value)| (*key, value.clone()))
             .collect::<Vec<(i64, String)>>();
+        println!("pair: {:#?}", pair);
         Ok(pair)
     }
 

@@ -2,7 +2,7 @@ use std::{collections::HashMap, i64};
 
 use chrono::NaiveDateTime;
 use regex::Regex;
-use sqlite3_ext::{ffi::SQLITE_FORMAT, Value, ValueType};
+use sqlite3_ext::{ffi::SQLITE_FORMAT, vtab::ConstraintOp, Value, ValueType};
 
 use crate::types::{ColumnDeclaration, CreateTableArgs};
 
@@ -166,55 +166,19 @@ pub fn extract_column_operator_pairs(input: &str) -> Vec<(&str, &str)> {
 }
 use std::ops::Bound;
 
-#[derive(Debug, PartialEq)]
-
 /// Represents a single condition in a SQL "WHERE" clause with a column name, an operator, and a value.
 ///
 /// - `column`: The name of the column the condition applies to.
 /// - `operator`: The comparison operator used in the condition (e.g., "=", ">", "<=").
 /// - `value`: The numeric value used for comparison in the condition.
+#[derive(Debug, PartialEq)]
 pub struct Condition {
-    column: String,
-    operator: String,
-    value: i64,
+    pub column: String,
+    pub operator: ConstraintOp,
+    pub value: Value,
 }
 
-/// Parses a `where_clause` string containing SQL-like conditions joined by "AND" into a vector of `Condition` structures.
-///
-/// # Parameters
-///
-/// - `where_clause`: A string representing the "WHERE" clause of a SQL query. Conditions within the string must be separated by "AND".
-///
-/// # Returns
-///
-/// - A vector of `Condition` structures representing each condition found in the `where_clause`.
-///
-/// # Example Usage
-///
-/// ```
-/// let where_clause = "column1 >= 10 AND column2 < 20";
-/// let conditions = parse_conditions(where_clause);
-/// ```
-pub fn parse_conditions(where_clause: &str) -> Vec<Condition> {
-    where_clause
-        .split(" AND ")
-        .filter_map(|cond| {
-            let parts: Vec<&str> = cond.split_whitespace().collect();
-            if parts.len() == 3 {
-                let column = parts[0].to_string();
-                let operator = parts[1].to_string();
-                parts[2].parse::<i64>().ok().map(|value| Condition {
-                    column,
-                    operator,
-                    value,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
+//
 /// Aggregates a list of `Condition` structures into a hashmap where each key is a column name,
 /// and the value is a tuple representing the lower and upper bounds of that column.
 /// This aggregation takes into account the operators in each condition to adjust the bounds accordingly.
@@ -255,26 +219,33 @@ pub fn aggregate_conditions_to_ranges(
             .entry(condition.column.clone())
             .or_insert((Bound::Unbounded, Bound::Unbounded));
 
-        match condition.operator.as_str() {
-            ">=" | ">" => {
+        let value: i64 = match condition.value {
+            Value::Text(value) => panic!(),
+            Value::Blob(_) => panic!(),
+            Value::Null => panic!(),
+            Value::Float(_) => panic!(),
+            Value::Integer(value) => value,
+        };
+        match condition.operator {
+            ConstraintOp::GE | ConstraintOp::GT => {
                 // ">=" does not need adjustment for the interval
-                let new_bound = Bound::Included(condition.value);
+                let new_bound = Bound::Included(value);
                 column_range.0 = update_bound(column_range.0, new_bound, true);
             }
-            "<" => {
+            ConstraintOp::LT => {
                 // "<" directly translates to an excluded upper bound without interval adjustment
-                let new_bound = Bound::Excluded(condition.value);
+                let new_bound = Bound::Excluded(value);
                 column_range.1 = update_bound(column_range.1, new_bound, false);
             }
-            "<=" => {
+            ConstraintOp::LE => {
                 // Adjust "<=" to include the upper range bound considering the interval
-                let new_bound = Bound::Included(condition.value);
+                let new_bound = Bound::Included(value);
                 column_range.1 = update_bound(column_range.1, new_bound, false);
             }
-            "=" => {
+            ConstraintOp::Eq => {
                 // "=" conditions set both bounds to include the value, considering the interval for upper bound
-                column_range.0 = Bound::Included(condition.value);
-                column_range.1 = Bound::Included(condition.value);
+                column_range.0 = Bound::Included(value);
+                column_range.1 = Bound::Included(value);
             }
             _ => {}
         }
