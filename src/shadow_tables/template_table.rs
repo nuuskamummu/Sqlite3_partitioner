@@ -67,9 +67,16 @@ pub trait Template {
     /// # Returns
     /// - `String`: A comma-separated string of column declarations.
     fn get_column_declarations(&self) -> String;
+    fn prepare_copy_template<'a>(
+        &'a self,
+        suffix: &'a str,
+        db: &'a Connection,
+    ) -> impl Fn() -> Result<String> + 'a;
 }
 
 /// Represents a template table with a name and a list of column declarations.
+
+#[derive(Debug)]
 pub struct TemplateTable {
     name: String,
     pub columns: Vec<ColumnDeclaration>,
@@ -137,13 +144,28 @@ impl Template for TemplateTable {
     }
 
     /// Copies the template table in the database, appending a suffix to the new table's name.
-    fn copy_template(&self, suffix: &str, db: &Connection) -> Result<String> {
+    fn copy_template<'a>(&self, suffix: &str, db: &Connection) -> Result<String> {
         let sql = self.copy_template_query(suffix);
-        println!("copy template query: {}", sql);
+
         Connection::execute(db, &sql, ())?;
         Ok(format!("{}_{}", self.get_base_name().unwrap(), suffix).to_string())
     }
+    fn prepare_copy_template<'a>(
+        &'a self,
+        suffix: &'a str,
+        db: &'a Connection,
+    ) -> impl Fn() -> Result<String> + 'a {
+        let sql = self.copy_template_query(suffix);
+        move || {
+            let result = db.execute(&sql, ());
+            match result {
+                Ok(_) => Ok(format!("{}_{}", self.get_base_name().unwrap(), suffix).to_string()),
+                Err(err) => Err(err),
+            }
+        }
+    }
 }
+
 #[cfg(test)]
 mod tests {
 

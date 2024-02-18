@@ -1,9 +1,7 @@
-use sqlite3_ext::{vtab::ChangeInfo, Connection, FromValue, Value, ValueRef, ValueType};
+use sqlite3_ext::{Connection, FromValue, Value, ValueRef};
 
 use crate::{
-    error::TableError,
-    types::{PartitionAccessor, RangePartition},
-    Lookup, Template,
+    error::TableError, types::PartitionAccessor, ColumnDeclaration, Lookup, Partition, Template,
 };
 
 use super::parsing::value_type_to_string;
@@ -26,12 +24,12 @@ use super::parsing::value_type_to_string;
 ///   error indicating a type mismatch between the provided value and the column definition.
 pub fn validate_and_map_columns<'vtab>(
     info: &[&ValueRef],
-    partition: &'vtab RangePartition,
+    column_declarations: &'vtab Vec<ColumnDeclaration>,
 ) -> sqlite3_ext::Result<Vec<(String, Value)>> {
     info.iter()
         .enumerate()
         .map(|(i, &v)| {
-            let reference_column = &partition.columns[i];
+            let reference_column = &column_declarations[i];
             if &v.value_type() == reference_column.get_value_type() {
                 Ok((reference_column.get_name().to_string(), v.to_owned()?))
             } else {
@@ -61,7 +59,7 @@ pub fn validate_and_map_columns<'vtab>(
 /// - `sqlite3_ext::Result<String>`: On successful resolution or creation, returns the name of the
 ///   partition as a `String`. On failure, returns an error related to the partition lookup or creation process.
 pub fn resolve_partition_name<'vtab>(
-    partition: &'vtab RangePartition,
+    partition: &'vtab Partition<i64>,
     connection: &Connection,
     bucket: i64,
 ) -> sqlite3_ext::Result<String> {

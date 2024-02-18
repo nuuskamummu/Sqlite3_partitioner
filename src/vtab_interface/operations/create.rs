@@ -2,7 +2,8 @@ use crate::utils::parse_create_table_args;
 use crate::utils::parse_interval;
 use crate::Lookup;
 use crate::LookupTable;
-use crate::RangePartition;
+use crate::Partition;
+use crate::PartitionAccessor;
 use crate::Root;
 use crate::RootTable;
 use crate::Template;
@@ -26,7 +27,7 @@ pub fn create_partition<'a>(
     db: &Connection,
     args: &[&str],
     insert: bool,
-) -> sqlite3_ext::Result<RangePartition> {
+) -> sqlite3_ext::Result<Partition<i64>> {
     let interval_col = args[3];
     let arguments = args.to_owned();
     let s_args = [&arguments[0..3], &arguments[4..]].concat();
@@ -49,7 +50,7 @@ pub fn create_partition<'a>(
 
     let template_table: TemplateTable =
         Template::create(&create_table_args.table_name, columns.clone());
-    let lookup_table: LookupTable = Lookup::create(&create_table_args.table_name, Vec::new())?;
+    let lookup_table: LookupTable<_> = Lookup::create(&create_table_args.table_name, Vec::new())?;
     if insert {
         root_table.create_table(db)?;
         lookup_table.create_table(db)?;
@@ -57,12 +58,11 @@ pub fn create_partition<'a>(
     } else {
         lookup_table.sync(db)?;
     }
-    Ok(RangePartition {
-        name: create_table_args.table_name,
-        interval: root_table.get_interval(),
-        columns: columns.clone(),
-        root: root_table,
-        lookup: lookup_table,
-        template: template_table,
-    })
+    Ok(Partition::new(
+        &create_table_args.table_name,
+        columns.clone(),
+        root_table,
+        lookup_table,
+        template_table,
+    ))
 }

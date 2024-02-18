@@ -7,7 +7,7 @@ use serde::de::{self, EnumAccess, SeqAccess, VariantAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sqlite3_ext::Blob;
 use sqlite3_ext::{vtab::ConstraintOp, Value, ValueType};
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColumnDeclaration {
     name: String,
     data_type: ValueType,
@@ -55,36 +55,65 @@ pub struct PartitionArgs {
     pub name: String,
     pub columns: Vec<String>,
 }
-pub struct RangePartition {
+// name: create_table_args.table_name,
+// interval: root_table.get_interval(),
+// columns: columns.clone(),
+// root: root_table,
+// lookup: lookup_table,
+// template: template_table,
+#[derive(Debug)]
+pub struct Partition<T> {
     pub name: String,
     pub columns: Vec<ColumnDeclaration>,
-    pub interval: i64,
+    // pub interval: i64,
     pub root: RootTable,
-    pub lookup: LookupTable,
+    pub lookup: LookupTable<T>,
     pub template: TemplateTable,
 }
-
-pub enum PartitionFactory {
-    Range(PartitionArgs),
+// type RangePartition = Partition<i64>;
+// pub enum PartitionFactory {
+//     Range(PartitionArgs),
+// }
+pub enum PartitionDef {
+    RangePartition(Partition<i64>),
 }
-pub enum Partition {
-    Range(RangePartition),
-}
-pub trait PartitionAccessor {
+pub trait PartitionAccessor<T> {
     fn get_template(&self) -> &TemplateTable;
     fn get_root(&self) -> &RootTable;
-    fn get_lookup(&self) -> &LookupTable;
+    fn get_lookup(&self) -> &LookupTable<T>;
+    fn new(
+        name: &str,
+        columns: Vec<ColumnDeclaration>,
+        root: RootTable,
+        lookup: LookupTable<T>,
+        template: TemplateTable,
+    ) -> Partition<T>;
 }
 
-impl<'a> PartitionAccessor for RangePartition {
+impl<'a, T> PartitionAccessor<T> for Partition<T> {
     fn get_root(&self) -> &RootTable {
         &self.root
     }
-    fn get_lookup(&self) -> &LookupTable {
+    fn get_lookup(&self) -> &LookupTable<T> {
         &self.lookup
     }
     fn get_template(&self) -> &TemplateTable {
         &self.template
+    }
+    fn new(
+        name: &str,
+        columns: Vec<ColumnDeclaration>,
+        root: RootTable,
+        lookup: LookupTable<T>,
+        template: TemplateTable,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            columns,
+            root,
+            lookup,
+            template,
+        }
     }
 }
 

@@ -164,7 +164,7 @@ pub fn extract_column_operator_pairs(input: &str) -> Vec<(&str, &str)> {
 
     result
 }
-use std::ops::Bound;
+use std::ops::Bound::{self, *};
 
 /// Represents a single condition in a SQL "WHERE" clause with a column name, an operator, and a value.
 ///
@@ -179,160 +179,113 @@ pub struct Condition {
 }
 
 //
-/// Aggregates a list of `Condition` structures into a hashmap where each key is a column name,
-/// and the value is a tuple representing the lower and upper bounds of that column.
-/// This aggregation takes into account the operators in each condition to adjust the bounds accordingly.
+/// Aggregates conditions into ranges for each column.
 ///
-/// # Parameters
+/// Parameters:
+/// - `conditions`: A vector of conditions to be aggregated into ranges.
 ///
-/// - `conditions`: A vector of `Condition` structures to be aggregated into column range bounds.
-///
-/// # Returns
-///
-/// - A hashmap where each key is a column name, and the value is a tuple of `Bound<i64>`
-/// representing the inclusive or exclusive lower and upper bounds for the column based on the conditions provided.
-///
-/// # Example Usage
-///
-/// ```
-/// let conditions = vec![
-///     Condition {
-///         column: "age".to_string(),
-///         operator: ">=".to_string(),
-///         value: 18,
-///     },
-///     Condition {
-///         column: "age".to_string(),
-///         operator: "<=".to_string(),
-///         value: 65,
-///     },
-/// ];
-/// let ranges = aggregate_conditions_to_ranges(conditions);
-/// ```
+/// Returns:
+/// - A HashMap where each key is a column name and its value is a tuple representing the range as lower and upper bounds.
 pub fn aggregate_conditions_to_ranges(
     conditions: Vec<Condition>,
 ) -> HashMap<String, (Bound<i64>, Bound<i64>)> {
     let mut ranges: HashMap<String, (Bound<i64>, Bound<i64>)> = HashMap::new();
 
     for condition in conditions {
-        let column_range = ranges
-            .entry(condition.column.clone())
-            .or_insert((Bound::Unbounded, Bound::Unbounded));
-
-        let value: i64 = match condition.value {
-            Value::Text(value) => panic!(),
-            Value::Blob(_) => panic!(),
-            Value::Null => panic!(),
-            Value::Float(_) => panic!(),
-            Value::Integer(value) => value,
-        };
-        match condition.operator {
-            ConstraintOp::GE | ConstraintOp::GT => {
-                // ">=" does not need adjustment for the interval
-                let new_bound = Bound::Included(value);
-                column_range.0 = update_bound(column_range.0, new_bound, true);
-            }
-            ConstraintOp::LT => {
-                // "<" directly translates to an excluded upper bound without interval adjustment
-                let new_bound = Bound::Excluded(value);
-                column_range.1 = update_bound(column_range.1, new_bound, false);
-            }
-            ConstraintOp::LE => {
-                // Adjust "<=" to include the upper range bound considering the interval
-                let new_bound = Bound::Included(value);
-                column_range.1 = update_bound(column_range.1, new_bound, false);
-            }
-            ConstraintOp::Eq => {
-                // "=" conditions set both bounds to include the value, considering the interval for upper bound
-                column_range.0 = Bound::Included(value);
-                column_range.1 = Bound::Included(value);
-            }
-            _ => {}
+        if let Value::Integer(value) = condition.value {
+            ranges
+                .entry(condition.column.clone())
+                .and_modify(|e| {
+                    update_bound(e, &condition.operator, value);
+                })
+                .or_insert_with(|| initial_bound(&condition.operator, value));
         }
+        // Handling of non-integer values omitted for brevity; could log, error, or skip.
     }
 
     ranges
 }
-use Bound::{Excluded, Included, Unbounded};
-
-/// Updates the bound based on the new value, considering whether it's a lower or upper bound. The
-/// most restrictive bound is selected.
+/// Updates the range bounds based on the condition operator and value.
 ///
 /// Parameters:
-/// - `current`: The current bound.
-/// - `new`: The new bound to compare against the current.
-/// - `is_lower`: A boolean indicating if we're updating a lower bound. True for lower, false for upper.
+/// - `range`: The current range bounds to update.
+/// - `operator`: The condition operator.
+/// - `value`: The integer value for the condition.
+fn update_bound(range: &mut (Bound<i64>, Bound<i64>), operator: &ConstraintOp, value: i64) {
+    match operator {
+        ConstraintOp::GT => range.0 = max_bound(range.0, Excluded(value)),
+        ConstraintOp::LT => range.1 = min_bound(range.1, Excluded(value)),
+        ConstraintOp::LE => range.1 = min_bound(range.1, Included(value)),
+        ConstraintOp::Eq => {
+            range.0 = Included(value);
+            range.1 = Included(value);
+        }
+        _ => {} // Other operators could be handled here as needed
+    }
+}
+/// Determines the initial bounds based on the first condition for a column.
+///
+/// Parameters:
+/// - `operator`: The condition operator.
+/// - `value`: The integer value for the condition.
 ///
 /// Returns:
-/// - The updated bound after comparing the current and new bounds.
-fn update_bound(current: Bound<i64>, new: Bound<i64>, is_lower: bool) -> Bound<i64> {
-    match (current, new) {
-        // If the current bound is unbounded, any new bound is more restrictive and should be taken.
-        (Unbounded, _) => new,
+/// - A tuple representing the initial range as lower and upper bounds.
+fn initial_bound(operator: &ConstraintOp, value: i64) -> (Bound<i64>, Bound<i64>) {
+    match operator {
+        ConstraintOp::GT => (Excluded(value), Unbounded),
+        ConstraintOp::LT => (Unbounded, Excluded(value)),
+        ConstraintOp::LE => (Unbounded, Included(value)),
+        ConstraintOp::Eq => (Included(value), Included(value)),
+        // Default case to handle other operators, assuming full range
+        _ => (Unbounded, Unbounded),
+    }
+}
 
-        // If the new bound is unbounded, it doesn't impose any new restrictions. Keep the current.
-        (_, Unbounded) => current,
-
-        // When both bounds are of the same type (both included or excluded),
-        // decide based on the comparison and whether we're updating a lower or upper bound.
-        (Included(a), Included(b)) | (Excluded(a), Excluded(b)) => {
-            update_same_type_bounds(a, b, is_lower)
-        }
-
-        // When the bounds are of different types, handle inclusivity/exclusivity carefully,
-        // especially important for adjacent or equal values.
-        (Included(a), Excluded(b)) | (Excluded(a), Included(b)) => {
-            update_different_type_bounds(a, b, is_lower)
+/// Finds the maximum of two lower bounds.
+///
+/// Parameters:
+/// - `a`: The first lower bound.
+/// - `b`: The second lower bound.
+///
+/// Returns:
+/// - The more restrictive of the two bounds.
+fn max_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
+    match (a, b) {
+        (Unbounded, _) => b,
+        (_, Unbounded) => a,
+        (Included(a_val), Included(b_val)) => Included(std::cmp::max(a_val, b_val)),
+        (Excluded(a_val), Excluded(b_val)) => Excluded(std::cmp::max(a_val, b_val)),
+        (Excluded(a_val), Included(b_val)) | (Included(a_val), Excluded(b_val)) => {
+            if a_val >= b_val {
+                Excluded(a_val)
+            } else {
+                Included(b_val)
+            }
         }
     }
 }
 
-/// Compares bounds of the same type (both included or excluded) to decide which to keep.
+/// Finds the minimum of two upper bounds.
 ///
 /// Parameters:
-/// - `a`: The value of the current bound.
-/// - `b`: The value of the new bound.
-/// - `is_lower`: Indicates if updating a lower bound.
+/// - `a`: The first upper bound.
+/// - `b`: The second upper bound.
 ///
 /// Returns:
-/// - The chosen bound based on the comparison and bound type.
-fn update_same_type_bounds(a: i64, b: i64, is_lower: bool) -> Bound<i64> {
-    if is_lower {
-        if a < b {
-            Included(b)
-        } else {
-            Included(a)
-        }
-    } else {
-        if a > b {
-            Included(b)
-        } else {
-            Included(a)
-        }
-    }
-}
-
-/// Compares bounds of different types (one included, one excluded) to decide which to keep.
-///
-/// Parameters:
-/// - `a`: The value of the current bound.
-/// - `b`: The value of the new bound.
-/// - `is_lower`: Indicates if updating a lower bound.
-///
-/// Returns:
-/// - The chosen bound based on the comparison, considering inclusivity/exclusivity.
-fn update_different_type_bounds(a: i64, b: i64, is_lower: bool) -> Bound<i64> {
-    if is_lower {
-        if a <= b {
-            Excluded(b)
-        } else {
-            Excluded(a)
-        }
-    } else {
-        if a >= b {
-            Excluded(b)
-        } else {
-            Excluded(a)
+/// - The more restrictive of the two bounds.
+fn min_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
+    match (a, b) {
+        (Unbounded, _) => b,
+        (_, Unbounded) => a,
+        (Included(a_val), Included(b_val)) => Included(std::cmp::min(a_val, b_val)),
+        (Excluded(a_val), Excluded(b_val)) => Excluded(std::cmp::min(a_val, b_val)),
+        (Excluded(a_val), Included(b_val)) | (Included(a_val), Excluded(b_val)) => {
+            if a_val <= b_val {
+                Excluded(a_val)
+            } else {
+                Included(b_val)
+            }
         }
     }
 }

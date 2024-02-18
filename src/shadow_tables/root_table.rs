@@ -70,11 +70,13 @@ pub trait Root {
 }
 
 /// Represents a root table with a name, partition column, and interval for partitioning.
+#[derive(Debug)]
 pub struct RootTable {
     name: String,
     pub partition_column: String,
     interval: i64,
 }
+
 impl Root for RootTable {
     /// Creates a new `RootTable` instance with specified name, partition column, and interval.
     fn create(name: &str, partition_column: String, interval: i64) -> Self {
