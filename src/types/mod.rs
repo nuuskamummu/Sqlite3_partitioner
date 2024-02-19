@@ -117,8 +117,6 @@ impl<'a, T> PartitionAccessor<T> for Partition<T> {
     }
 }
 
-type Rows = Vec<Vec<(String, Value)>>;
-
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone, Copy)]
 #[serde(remote = "ConstraintOp")]
 pub enum ConstraintOpDef {
@@ -298,32 +296,6 @@ pub fn option_serializable_value_to_option_value(
     option_serializable_value.map(|serializable_value| serializable_value.into())
 }
 
-// fn serialize_value(value: &ValueDef) -> sqlite3_ext::Result<String> {
-//     match to_string_pretty(value, PrettyConfig::new().indentor("    ".into())) {
-//         Ok(value) => Ok(value),
-//         Err(err) => Err(sqlite3_ext::Error::Sqlite(
-//             1,
-//             Some(format!("Error serializing. {}", err.to_string())),
-//         )),
-//     }
-// }
-//
-// fn deserialize_value(serialized: &str) -> sqlite3_ext::Result<ValueDef> {
-//     match from_str(serialized) {
-//         Ok(value) => Ok(value),
-//         Err(err) => Err(sqlite3_ext::Error::Sqlite(
-//             1,
-//             Some(format!(
-//                 "Error deserialzing str {}. {}",
-//                 serialized,
-//                 err.to_string()
-//             )),
-//         )),
-//     }
-// }
-// pub struct ConstraintOperators(pub ConstraintOpDef);
-//
-// pub struct RangeOperators(pub ConstraintOp);
 impl Display for ConstraintOpDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -393,17 +365,3 @@ impl From<ConstraintOp> for ConstraintOpDef {
         }
     }
 }
-
-// impl Display for RangeOperators {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         match self.0 {
-//             ConstraintOp::Eq => write!(f, "Included"),
-//             ConstraintOp::GT => write!(f, "Excluded"),
-//             ConstraintOp::LE => write!(f, "Included"),
-//             ConstraintOp::LT => write!(f, "Excluded"),
-//             ConstraintOp::GE => write!(f, "Included"),
-//
-//             _ => Err(fmt::Error),
-//         }
-//     }
-// }

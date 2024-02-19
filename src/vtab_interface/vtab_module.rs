@@ -44,7 +44,6 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
 }
 impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
     fn update(&'vtab self, info: &mut ChangeInfo) -> ExtResult<i64> {
-        println!("updating {:#?}", info);
         let (sql, params) = match info.change_type() {
             ChangeType::Insert => insert(&self.partition_interface, &self.connection, info)?,
             ChangeType::Update => unimplemented!(),
@@ -80,8 +79,6 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
         ))
     }
     fn open(&'vtab self) -> ExtResult<Self::Cursor> {
-        println!("{}", self.partition_interface.get_root().get_interval());
-        println!("buckets: {}", "placeholder");
         Ok(RangePartitionCursor::new(self))
     }
 
@@ -100,7 +97,6 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
             Some((_name, constraints)) => constraints
                 .iter()
                 .map(|constraint| {
-                    println!("constraint in best index {:#?}", constraint);
                     let wherec = WhereClause {
                         column_name: "partition_value".to_string(),
                         operator: constraint.operator,
@@ -116,7 +112,6 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
             .and_then(|clause| where_clauses.insert("lookup_table".to_string(), clause));
         index_info.set_index_str(Some(&ron::to_string(&where_clauses).unwrap()))?;
 
-        println!("bestindex {:#?}", index_info);
         Ok(())
     }
     fn disconnect(&mut self) -> ExtResult<()> {

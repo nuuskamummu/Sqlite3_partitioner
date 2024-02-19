@@ -170,7 +170,6 @@ impl Lookup<i64> for LookupTable<i64> {
     fn update_current_entry(&self, new_key: i64) {
         let mut current_key = self.current_partition.write().unwrap(); // Obtain write lock
         *current_key = new_key; // Update the current key
-        println!("updating key {:#?}", current_key);
     }
     // Method to access an entry
     fn access_current_entry<F>(&self, access_fn: F) -> Option<(i64, String)>
@@ -192,7 +191,6 @@ impl Lookup<i64> for LookupTable<i64> {
     fn create_table(&self, db: &Connection) -> Result<bool> {
         let sql = self.create_table_query();
 
-        print!("{}", sql);
         Connection::execute(db, &sql, ())?;
         Ok(true)
     }
@@ -287,12 +285,10 @@ impl Lookup<i64> for LookupTable<i64> {
 
         // Iterate over query results to update partitions map.
         while let Ok(Some(row)) = results.next() {
-            println!("row: {:#?}", row);
             let partition_value = row[0].get_i64();
             let partition_table_name = row[1].get_str()?;
             borrowed_partitions.insert(partition_value, partition_table_name.to_string());
         }
-        println!("Sync. Partitions: {:#?}", borrowed_partitions);
         drop(borrowed_partitions);
         Ok(())
     }
@@ -378,11 +374,9 @@ impl Lookup<i64> for LookupTable<i64> {
             )
         })?;
         let range = borrowed_partitions.range((from, to));
-        println!("{:?}", range);
         let pair = range
             .map(|(key, value)| (*key, value.clone()))
             .collect::<Vec<(i64, String)>>();
-        println!("pair: {:#?}", pair);
         Ok(pair)
     }
 
@@ -431,7 +425,6 @@ impl Lookup<i64> for LookupTable<i64> {
     /// - `Result<String>`: The name of the newly inserted partition table.
     fn insert(&self, db: &Connection, partition_value: i64) -> Result<String> {
         let partition_table_name = format!("{}_{}", self.base_name, partition_value);
-        println!("Preparing to insert: {}", partition_table_name);
 
         let result =
             Connection::prepare(db, &self.insert_query())?.execute(|stmt: &mut Statement| {
@@ -441,12 +434,6 @@ impl Lookup<i64> for LookupTable<i64> {
                 Ok(())
             });
 
-        match result {
-            Ok(_) => println!("Insert executed successfully."),
-            Err(e) => println!("Error executing insert: {:?}", e),
-        }
-
-        println!("Acquiring write lock for partitions...");
         let mut borrowed_partitions = self.partitions.write().map_err(|err| {
             sqlite3_ext::Error::Sqlite(
                 1,
@@ -457,10 +444,7 @@ impl Lookup<i64> for LookupTable<i64> {
             )
         })?;
 
-        println!("Inserting into partitions map...");
         borrowed_partitions.insert(partition_value, partition_table_name.clone());
-
-        println!("Insert complete.");
 
         Ok(partition_table_name)
     }
