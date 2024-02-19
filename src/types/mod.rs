@@ -55,12 +55,7 @@ pub struct PartitionArgs {
     pub name: String,
     pub columns: Vec<String>,
 }
-// name: create_table_args.table_name,
-// interval: root_table.get_interval(),
-// columns: columns.clone(),
-// root: root_table,
-// lookup: lookup_table,
-// template: template_table,
+
 #[derive(Debug)]
 pub struct Partition<T> {
     pub name: String,
@@ -70,10 +65,7 @@ pub struct Partition<T> {
     pub lookup: LookupTable<T>,
     pub template: TemplateTable,
 }
-// type RangePartition = Partition<i64>;
-// pub enum PartitionFactory {
-//     Range(PartitionArgs),
-// }
+
 pub enum PartitionDef {
     RangePartition(Partition<i64>),
 }

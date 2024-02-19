@@ -1,9 +1,6 @@
-use sqlite3_ext::{ffi::SQLITE_NOTFOUND, vtab::ChangeInfo, Connection, FromValue, Value, ValueRef};
+use sqlite3_ext::{vtab::ChangeInfo, FromValue, Value, ValueRef};
 
-use crate::{
-    utils::{calculate_bucket, resolve_partition_name, validate_and_map_columns},
-    Lookup, Partition, PartitionAccessor, Root,
-};
+use crate::{Lookup, Partition, PartitionAccessor};
 pub fn prepare_delete_statement(partition_name: &str, num_columns: usize) -> String {
     let placeholders = std::iter::repeat("?")
         .take(num_columns)
@@ -18,7 +15,6 @@ pub fn delete<'vtab>(
     partition: &'vtab Partition<i64>,
     info: &mut ChangeInfo,
 ) -> sqlite3_ext::Result<(String, Vec<Value>)> {
-    println!("delete {:#?}", info);
     let (_partition_value, partition_name) = partition
         .get_lookup()
         .access_current_entry(|(partition_value, partition_name)| {

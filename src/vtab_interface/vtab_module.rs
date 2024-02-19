@@ -3,7 +3,7 @@ use crate::{
     operations::{delete::delete, insert::insert},
     vtab_interface::WhereClause,
 };
-use crate::{Partition, PartitionAccessor, Root, Template};
+use crate::{Partition, PartitionAccessor, Template};
 use sqlite3_ext::{sqlite3_ext_vtab, vtab::VTab};
 use sqlite3_ext::{
     vtab::{ChangeInfo, ChangeType, CreateVTab, UpdateVTab, VTabConnection},
@@ -16,7 +16,6 @@ use super::{construct_where_clause, create_partition};
 #[sqlite3_ext_vtab(StandardModule, UpdateVTab)]
 pub struct PartitionMetaTable<'vtab> {
     pub partition_interface: Partition<i64>,
-    // rows: Option<&'vtab mut Vec<Vec<(String, Value)>>>,
     pub connection: &'vtab Connection,
 }
 impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
