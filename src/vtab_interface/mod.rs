@@ -11,6 +11,7 @@ use sqlite3_ext::{
     vtab::{ChangeInfo, ConstraintOp, IndexInfoConstraint},
     Connection, Result as ExtResult,
 };
+pub use vtab_cursor::ResultRow;
 
 use std::{
     collections::HashMap,

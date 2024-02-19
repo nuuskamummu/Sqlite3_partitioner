@@ -121,6 +121,11 @@ pub trait Lookup<T> {
         from: Bound<T>,
         to: Bound<T>,
     ) -> Result<Vec<(T, String)>>;
+
+    fn update_current_entry(&self, new_key: T);
+    fn access_current_entry<F>(&self, access_fn: F) -> Option<(T, String)>
+    where
+        F: FnOnce((&T, &String)) -> (T, String);
 }
 #[derive(Debug, Clone)]
 /// Represents a partition table with a specific name and value.
@@ -128,22 +133,13 @@ pub struct PartitionTable {
     name: String,
     value: i64,
 }
-impl PartitionTable {
-    /// Creates a new `PartitionTable` instance with a specified name and value.
-    fn new(name: &str, value: i64) -> Self {
-        PartitionTable {
-            name: format!("{}_{}", name, value).to_string(),
-            value,
-        }
-    }
-}
-
 /// Represents a lookup table with a base name and a map of partitions.
 
 #[derive(Debug)]
 pub struct LookupTable<T> {
     base_name: String,
     pub partitions: RwLock<BTreeMap<T, String>>,
+    current_partition: RwLock<T>,
 }
 impl Lookup<i64> for LookupTable<i64> {
     /// Creates a new `LookupTable` instance with a specified base name and initial partitions.
@@ -163,12 +159,29 @@ impl Lookup<i64> for LookupTable<i64> {
                 .map(|partition| (partition.value, partition.name))
                 .collect(),
         );
+
         Ok(LookupTable {
             partitions: partition_tree,
             base_name: name.to_string(),
+            current_partition: RwLock::default(),
         })
     }
 
+    fn update_current_entry(&self, new_key: i64) {
+        let mut current_key = self.current_partition.write().unwrap(); // Obtain write lock
+        *current_key = new_key; // Update the current key
+        println!("updating key {:#?}", current_key);
+    }
+    // Method to access an entry
+    fn access_current_entry<F>(&self, access_fn: F) -> Option<(i64, String)>
+    where
+        F: FnOnce((&i64, &String)) -> (i64, String),
+    {
+        let current_key = self.current_partition.read().unwrap(); // Obtain read lock for key
+        let map = self.partitions.read().unwrap(); // Obtain read lock for map
+        map.get_key_value(&*current_key)
+            .map(|(key, value)| access_fn((key, value)))
+    }
     /// Executes the SQL query to create the lookup table in the specified database connection.
     ///
     /// # Parameters

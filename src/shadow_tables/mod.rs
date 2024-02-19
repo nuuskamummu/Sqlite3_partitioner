@@ -1,3 +1,4 @@
+mod bucket_table;
 pub mod lookup_table;
 pub mod root_table;
 pub mod template_table;

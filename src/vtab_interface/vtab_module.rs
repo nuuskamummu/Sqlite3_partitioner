@@ -44,10 +44,11 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
 }
 impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
     fn update(&'vtab self, info: &mut ChangeInfo) -> ExtResult<i64> {
+        println!("updating {:#?}", info);
         let (sql, params) = match info.change_type() {
             ChangeType::Insert => insert(&self.partition_interface, &self.connection, info)?,
             ChangeType::Update => unimplemented!(),
-            ChangeType::Delete => delete(&self.partition_interface, &self.connection, info)?,
+            ChangeType::Delete => delete(&self.partition_interface, info)?,
         };
 
         Ok(self.connection.execute(&sql, params)?)
@@ -115,6 +116,7 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
             .and_then(|clause| where_clauses.insert("lookup_table".to_string(), clause));
         index_info.set_index_str(Some(&ron::to_string(&where_clauses).unwrap()))?;
 
+        println!("bestindex {:#?}", index_info);
         Ok(())
     }
     fn disconnect(&mut self) -> ExtResult<()> {

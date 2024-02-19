@@ -79,6 +79,7 @@ pub trait Template {
 #[derive(Debug)]
 pub struct TemplateTable {
     name: String,
+
     pub columns: Vec<ColumnDeclaration>,
 }
 
