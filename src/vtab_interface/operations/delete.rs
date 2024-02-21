@@ -12,20 +12,16 @@ pub fn prepare_delete_statement(partition_name: &str, num_columns: usize) -> Str
     )
 }
 pub fn delete<'vtab>(
-    partition: &'vtab Partition<i64>,
-    info: &mut ChangeInfo,
+    partition_value: i64,
+    partition_name: String,
+    row_ids: Vec<Value>,
 ) -> sqlite3_ext::Result<(String, Vec<Value>)> {
-    let (_partition_value, partition_name) = partition
-        .get_lookup()
-        .access_current_entry(|(partition_value, partition_name)| {
-            (*partition_value, partition_name.clone())
-        })
-        .unwrap();
+    println!("deleting: {:#?}", row_ids);
+    // println!("{:#?}", info.rowid)
+
     let sql = format!("DELETE FROM {} WHERE ROWID IN ({})", partition_name, "?");
-    let value: &ValueRef = info.rowid();
-    let mut values: Vec<Value> = Vec::new();
-    values.push(value.to_owned().unwrap());
-    Ok((sql, values))
+
+    Ok((sql, row_ids))
 }
 pub fn update<'vtab>(
     partition: &'vtab Partition<i64>,

@@ -113,6 +113,7 @@ pub fn parse_interval(interval_str: &str) -> Result<i64, String> {
 /// let args = vec!["module", "db_name", "table_name", "id INT", "name VARCHAR"];
 /// let create_table_args = parse_create_table_args(&args);
 /// ```
+
 pub fn parse_create_table_args(args: &[&str]) -> Result<CreateTableArgs, String> {
     let _module = args[0];
     let _database_name = args[1];

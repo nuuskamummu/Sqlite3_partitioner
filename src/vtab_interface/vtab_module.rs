@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::sync::RwLock;
+
 use crate::vtab_interface::vtab_cursor::*;
 use crate::{
     operations::{delete::delete, insert::insert},
@@ -7,21 +10,22 @@ use crate::{Partition, PartitionAccessor, Template};
 use sqlite3_ext::{sqlite3_ext_vtab, vtab::VTab};
 use sqlite3_ext::{
     vtab::{ChangeInfo, ChangeType, CreateVTab, UpdateVTab, VTabConnection},
-    Connection, Result as ExtResult,
+    Result as ExtResult,
 };
 
 use super::{construct_where_clause, create_partition};
 
-#[derive(Debug)]
+// #[derive(Debug)]
 #[sqlite3_ext_vtab(StandardModule, UpdateVTab)]
 pub struct PartitionMetaTable<'vtab> {
     pub partition_interface: Partition<i64>,
-    pub connection: &'vtab Connection,
+    pub connection: &'vtab VTabConnection,
+    pub aux: &'vtab RwLock<BTreeMap<i64, ResultBucket>>, // pub bucket_modules: RwLock<Vec<BucketModule<'vtab>>>,
 }
 impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
     fn create(
         db: &'vtab VTabConnection,
-        _aux: &'vtab Self::Aux,
+        aux: &'vtab Self::Aux,
         args: &[&str],
     ) -> ExtResult<(String, Self)>
     where
@@ -34,6 +38,7 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
             PartitionMetaTable {
                 partition_interface: p,
                 connection: db,
+                aux, // bucket_modules: RwLock::default(),
             },
         ))
     }
@@ -43,23 +48,32 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
 }
 impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
     fn update(&'vtab self, info: &mut ChangeInfo) -> ExtResult<i64> {
-        let (sql, params) = match info.change_type() {
-            ChangeType::Insert => insert(&self.partition_interface, &self.connection, info)?,
+        match info.change_type() {
+            ChangeType::Insert => unimplemented!(), //insert(&self.partition_interface, &self.connection, info)?,
             ChangeType::Update => unimplemented!(),
-            ChangeType::Delete => delete(&self.partition_interface, info)?,
+            ChangeType::Delete => self.aux.read().unwrap().iter().for_each(|partition| {
+                let values = partition
+                    .1
+                    .rows
+                    .iter()
+                    .map(|row| row.rowid_column().unwrap().get_value().clone())
+                    .collect();
+                let (sql, params) =
+                    delete(*partition.0, partition.1.partition_name.clone(), values).unwrap();
+                self.connection.execute(&sql, params).unwrap();
+            }),
         };
-
-        Ok(self.connection.execute(&sql, params)?)
+        Ok(1)
+        // Ok(self.connection.execute(&sql, params));
     }
 }
 impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
-    type Aux = ();
+    type Aux = RwLock<BTreeMap<i64, ResultBucket>>; //&'vtab RwLock<Vec<BucketModule<'vtab>>>;
     type Cursor = RangePartitionCursor<'vtab>;
 
     fn connect(
         db: &'vtab VTabConnection,
-        _aux: &'vtab Self::Aux,
-
+        aux: &'vtab Self::Aux,
         args: &[&str],
     ) -> ExtResult<(String, Self)>
     where
@@ -73,7 +87,7 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
             PartitionMetaTable {
                 partition_interface: p,
                 connection,
-                // rows: None,
+                aux, // bucket_modules: RwLock::default(), // rows: None,
             },
         ))
     }
@@ -82,6 +96,7 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
     }
 
     fn best_index(&self, index_info: &mut sqlite3_ext::vtab::IndexInfo) -> ExtResult<()> {
+        self.connection;
         let mut argv_index = 0;
         for mut constraint in index_info.constraints() {
             if constraint.usable() {

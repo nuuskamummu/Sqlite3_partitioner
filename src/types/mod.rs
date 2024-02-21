@@ -47,6 +47,7 @@ impl ColumnDeclaration {
         &self.data_type
     }
 }
+#[derive(Debug)]
 pub struct CreateTableArgs {
     pub table_name: String,
     pub columns: Vec<ColumnDeclaration>,

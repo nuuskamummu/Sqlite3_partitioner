@@ -1,7 +1,8 @@
+mod bucket_cursor;
+mod bucket_module;
 pub mod operations;
 mod vtab_cursor;
 mod vtab_module;
-
 use crate::{vtab_interface::vtab_module::*, Partition};
 use operations::create::*;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ use std::{
     collections::HashMap,
     fmt::Display,
     ops::{Deref, DerefMut},
+    sync::RwLock,
 };
 
 use crate::{
@@ -26,7 +28,11 @@ use crate::{
 
 #[sqlite3_ext_main]
 fn init(db: &Connection) -> ExtResult<()> {
-    db.create_module("Partitioner", PartitionMetaTable::module(), ())?;
+    db.create_module(
+        "Partitioner",
+        PartitionMetaTable::module(),
+        RwLock::default(),
+    )?;
     Ok(())
 }
 

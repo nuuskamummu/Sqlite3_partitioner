@@ -22,7 +22,9 @@ pub fn prepare_variadic_values(columns: &[(String, Value)]) -> Vec<Value> {
     let c = columns.iter().map(|(_, value)| value.clone()).collect();
     c
 }
-
+// pub fn testing<'a>(db: &Connection, args:&[&str]) {
+//
+// }
 pub fn create_partition<'a>(
     db: &Connection,
     args: &[&str],

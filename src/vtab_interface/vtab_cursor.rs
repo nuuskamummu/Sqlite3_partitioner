@@ -2,39 +2,58 @@ use std::ops::{Bound, Index};
 use std::usize;
 
 use super::{PartitionMetaTable, WhereClauses};
+use crate::shadow_tables::Bucket;
 use crate::utils::{aggregate_conditions_to_ranges, Condition};
+use crate::vtab_interface::bucket_cursor::BucketCursor;
 use crate::{Lookup, PartitionAccessor};
 use sqlite3_ext::ffi::SQLITE_ERROR;
 use sqlite3_ext::query::Column;
-use sqlite3_ext::vtab::ColumnContext;
+use sqlite3_ext::vtab::{ColumnContext, UpdateVTab, VTab};
 use sqlite3_ext::{vtab::VTabCursor, Value, ValueRef};
 use sqlite3_ext::{FallibleIteratorMut, FromValue, Result as ExtResult};
 
-#[derive(Debug)]
+// #[derive(Debug)]
 pub struct RangePartitionCursor<'cursor> {
     result_iterator_counter: i64,
     meta_table: &'cursor PartitionMetaTable<'cursor>,
     buckets: Vec<ResultBucket>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResultBucket {
+    pub partition_name: String,
     partition_index: i64, //index in lookup_table.partitions.
-    rows: Vec<ResultRow>,
+    pub rows: Vec<ResultRow>,
 }
 impl ResultBucket {
-    fn new(partition_index: i64, rows: Vec<ResultRow>) -> Self {
+    pub fn new(partition_name: String, partition_index: i64, rows: Vec<ResultRow>) -> Self {
         Self {
+            partition_name,
             partition_index,
             rows,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResultRow {
     columns: Vec<ResultColumn>,
 }
+impl ResultRow {
+    pub fn rowid_column(&self) -> sqlite3_ext::Result<&ResultColumn> {
+        println!("{:#?}", self.columns);
+        self.columns
+            .iter()
+            .find(|col| col.name.to_lowercase() == "rowid")
+            .ok_or_else(|| {
+                sqlite3_ext::Error::Sqlite(SQLITE_ERROR, Some("Rowid column not found".into()))
+            })
+    }
+    pub fn get_columns(&self) -> &Vec<ResultColumn> {
+        &self.columns
+    }
+}
+
 impl FromIterator<ResultColumn> for ResultRow {
     fn from_iter<T: IntoIterator<Item = ResultColumn>>(iter: T) -> Self {
         let columns: Vec<ResultColumn> = iter.into_iter().collect();
@@ -42,20 +61,23 @@ impl FromIterator<ResultColumn> for ResultRow {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResultColumn {
     name: String,
     value: Value,
 }
 impl ResultColumn {
-    fn new(column: &Column) -> ExtResult<Self> {
+    pub fn new(column: &Column) -> ExtResult<Self> {
         let name = column.name()?.to_owned();
         let value = column.to_owned()?;
         Ok(Self { name, value })
     }
+    pub fn get_value(&self) -> &Value {
+        &self.value
+    }
 }
 impl<'cursor> RangePartitionCursor<'cursor> {
-    pub fn new(meta_table: &'cursor PartitionMetaTable) -> Self {
+    pub fn new(meta_table: &'cursor PartitionMetaTable<'cursor>) -> Self {
         Self {
             result_iterator_counter: i64::default(),
             buckets: Vec::new(),
@@ -175,12 +197,12 @@ impl<'cursor> RangePartitionCursor<'cursor> {
 
         (partition_where_str, lookup_conditions)
     }
-    fn query_partitions(
+    fn get_partition_targets(
         &self,
-        partition_where_str: &str,
+
         lookup_conditions: Vec<Condition>,
         args: &mut [&mut ValueRef],
-    ) -> ExtResult<Vec<ResultBucket>> {
+    ) -> ExtResult<Vec<(i64, String)>> {
         let ranges = aggregate_conditions_to_ranges(lookup_conditions);
         let (lower_bound, upper_bound) = ranges
             .get("partition_value")
@@ -189,44 +211,15 @@ impl<'cursor> RangePartitionCursor<'cursor> {
         self.meta_table
             .partition_interface
             .get_lookup()
-            .get_partitions_by_range(self.meta_table.connection, *lower_bound, *upper_bound)?
-            .iter()
-            .try_fold(Vec::new(), |mut acc, (partition_value, partition_name)| {
-                let sql = format!(
-                    "SELECT *, rowid FROM {} {}",
-                    partition_name, partition_where_str
-                );
-                let mut stmt = self.meta_table.connection.prepare(&sql)?;
-                let result_rows = stmt.query(args.as_mut())?;
-
-                let mut row_columns = Vec::new();
-                while let Ok(Some(row)) = result_rows.next() {
-                    let columns = (0..row.len())
-                        .filter_map(|index| {
-                            let column = row.index(index);
-                            ResultColumn::new(column).ok()
-                        })
-                        .collect::<Vec<_>>();
-
-                    if !columns.is_empty() {
-                        row_columns.push(ResultRow::from_iter(columns));
-                    }
-                }
-
-                if !row_columns.is_empty() {
-                    acc.push(ResultBucket::new(*partition_value, row_columns));
-                }
-                Ok(acc)
-            })
+            .get_partitions_by_range(self.meta_table.connection, *lower_bound, *upper_bound)
     }
-    fn setup_cursor_state(&mut self, queries: Vec<ResultBucket>) {
-        if let Some(first_query) = queries.first() {
+    fn setup_cursor_state(&mut self) {
+        if let Some(first_query) = self.buckets.first() {
             self.result_iterator_counter = 0;
             self.meta_table
                 .partition_interface
                 .get_lookup()
                 .update_current_entry(first_query.partition_index);
-            self.buckets = queries;
         } else {
             self.result_iterator_counter = -1;
         }
@@ -241,8 +234,48 @@ impl<'cursor> VTabCursor<'cursor> for RangePartitionCursor<'cursor> {
         args: &mut [&mut ValueRef],
     ) -> ExtResult<()> {
         let (partition_where_str, lookup_conditions) = self.parse_where_clauses(idx_str, args);
-        let queries = self.query_partitions(&partition_where_str, lookup_conditions, args)?;
-        self.setup_cursor_state(queries);
+        let partition_targets = self.get_partition_targets(lookup_conditions, args)?;
+
+        // Clear existing cursors and prepare for new query
+        // self.partition_buckets.clear();
+        // let mut bucket_modules = self.meta_table.bucket_modules.write().unwrap();
+        // bucket_modules.clear();
+
+        // let slice_of_str: &[&str] = &a;
+        let a = partition_targets
+            .iter()
+            .map(|(partition_value, partition_name)| {
+                BucketCursor::new(
+                    Bucket::new(
+                        partition_name.to_string(),
+                        self.meta_table
+                            .partition_interface
+                            .get_template()
+                            .columns
+                            .clone(),
+                        *partition_value,
+                    ),
+                    // self.meta_table.aux,
+                )
+            });
+
+        for mut b in a {
+            let c = b.filter(&partition_where_str, args, self.meta_table.connection)?;
+            match c {
+                Some(result) => {
+                    self.buckets.push(result.clone());
+                    self.meta_table
+                        .aux
+                        .write()
+                        .unwrap()
+                        .insert(b.bucket_module.get_partition_value(), result.clone());
+                }
+                None => (),
+            }
+        }
+
+        self.result_iterator_counter = 0;
+        self.setup_cursor_state();
         Ok(())
     }
 
@@ -259,7 +292,8 @@ impl<'cursor> VTabCursor<'cursor> for RangePartitionCursor<'cursor> {
                 // println!("Error advancing to next row/bucket: {:?}", e);
                 Err(e)
             }
-        }
+        }?;
+        Ok(())
     }
 
     fn eof(&self) -> bool {
@@ -277,6 +311,7 @@ impl<'cursor> VTabCursor<'cursor> for RangePartitionCursor<'cursor> {
     }
 
     fn rowid(&self) -> ExtResult<i64> {
+        println!("ROWID {:?}", self.result_iterator_counter);
         let current_row = self.get_current_row()?;
         let rowid_column = current_row
             .columns

@@ -10,12 +10,26 @@
 //     fn get_column_declarations(&self) -> String;
 // }
 
-use std::collections::HashMap;
+use crate::ColumnDeclaration;
 
-use crate::ResultRow;
-
+#[derive(Debug)]
 pub struct Bucket {
-    rows: ResultRow,
+    name: String,
+    partition_value: i64,
+    pub columns: Vec<ColumnDeclaration>,
 }
-
-type Buckets = HashMap<String, Bucket>;
+impl Bucket {
+    pub fn new(name: String, columns: Vec<ColumnDeclaration>, partition_value: i64) -> Self {
+        Self {
+            name,
+            columns,
+            partition_value,
+        }
+    }
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+    pub fn get_partition_value(&self) -> i64 {
+        self.partition_value
+    }
+}
