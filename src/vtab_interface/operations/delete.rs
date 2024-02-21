@@ -11,21 +11,20 @@ pub fn prepare_delete_statement(partition_name: &str, num_columns: usize) -> Str
         partition_name, placeholders
     )
 }
-pub fn delete<'vtab>(
-    partition: &'vtab Partition<i64>,
-    info: &mut ChangeInfo,
-) -> sqlite3_ext::Result<(String, Vec<Value>)> {
-    let (_partition_value, partition_name) = partition
-        .get_lookup()
-        .access_current_entry(|(partition_value, partition_name)| {
-            (*partition_value, partition_name.clone())
-        })
-        .unwrap();
-    let sql = format!("DELETE FROM {} WHERE ROWID IN ({})", partition_name, "?");
-    let value: &ValueRef = info.rowid();
-    let mut values: Vec<Value> = Vec::new();
-    values.push(value.to_owned().unwrap());
-    Ok((sql, values))
+pub fn delete<'vtab>(partition_name: String, value: i64) -> sqlite3_ext::Result<String> {
+    // let (_partition_value, partition_name) = partition
+    //     .get_lookup()
+    //     .access_current_entry(|(partition_value, partition_name)| {
+    //         (*partition_value, partition_name.clone())
+    //     })
+    //     .unwrap();
+    // let placeholders = std::iter::repeat("?")
+    //     .take(values_count) // Take as many "?" as there are elements in the vec.
+    //     .collect::<Vec<&str>>()
+    //     .join(", ");
+    let sql = format!("DELETE FROM {} WHERE ROWID IN ({})", partition_name, value);
+
+    Ok(sql)
 }
 pub fn update<'vtab>(
     partition: &'vtab Partition<i64>,

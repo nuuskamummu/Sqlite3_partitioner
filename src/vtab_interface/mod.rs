@@ -17,6 +17,7 @@ use std::{
     collections::HashMap,
     fmt::Display,
     ops::{Deref, DerefMut},
+    sync::RwLock,
 };
 
 use crate::{
@@ -26,7 +27,11 @@ use crate::{
 
 #[sqlite3_ext_main]
 fn init(db: &Connection) -> ExtResult<()> {
-    db.create_module("Partitioner", PartitionMetaTable::module(), ())?;
+    db.create_module(
+        "Partitioner",
+        PartitionMetaTable::module(),
+        RwLock::default(),
+    )?;
     Ok(())
 }
 

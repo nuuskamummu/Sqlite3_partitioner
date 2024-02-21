@@ -13,20 +13,23 @@ use sqlite3_ext::{FallibleIteratorMut, FromValue, Result as ExtResult};
 #[derive(Debug)]
 pub struct RangePartitionCursor<'cursor> {
     result_iterator_counter: i64,
+    internal_rowid_counter: i64,
     meta_table: &'cursor PartitionMetaTable<'cursor>,
     buckets: Vec<ResultBucket>,
 }
 
 #[derive(Debug)]
 pub struct ResultBucket {
-    partition_index: i64, //index in lookup_table.partitions.
-    rows: Vec<ResultRow>,
+    pub partition_index: i64, //index in lookup_table.partitions.
+    pub partition_name: String,
+    pub rows: Vec<ResultRow>,
 }
 impl ResultBucket {
-    fn new(partition_index: i64, rows: Vec<ResultRow>) -> Self {
+    fn new(partition_index: i64, rows: Vec<ResultRow>, partition_name: String) -> Self {
         Self {
             partition_index,
             rows,
+            partition_name,
         }
     }
 }
@@ -60,6 +63,7 @@ impl<'cursor> RangePartitionCursor<'cursor> {
             result_iterator_counter: i64::default(),
             buckets: Vec::new(),
             meta_table,
+            internal_rowid_counter: i64::default(),
         }
     }
     fn get_current_partition(&self) -> ExtResult<(i64, String)> {
@@ -214,7 +218,11 @@ impl<'cursor> RangePartitionCursor<'cursor> {
                 }
 
                 if !row_columns.is_empty() {
-                    acc.push(ResultBucket::new(*partition_value, row_columns));
+                    acc.push(ResultBucket::new(
+                        *partition_value,
+                        row_columns,
+                        partition_name.clone(),
+                    ));
                 }
                 Ok(acc)
             })
@@ -248,7 +256,41 @@ impl<'cursor> VTabCursor<'cursor> for RangePartitionCursor<'cursor> {
 
     fn next(&mut self) -> ExtResult<()> {
         match self.advance_to_next_row() {
-            Ok(true) => Ok(()), // Successfully advanced to the next row/bucket
+            Ok(true) => {
+                let (current_partition, (current_bucket_index, current_bucket), current_row) = (
+                    self.get_current_partition().unwrap(),
+                    self.get_current_bucket().unwrap(),
+                    self.get_current_row().unwrap(),
+                );
+                let rowid_column = current_row
+                    .columns
+                    .iter()
+                    .find(|col| col.name == "rowid")
+                    .ok_or_else(|| {
+                        sqlite3_ext::Error::Sqlite(
+                            SQLITE_ERROR,
+                            Some("Rowid column not found".into()),
+                        )
+                    })?;
+
+                let rowid = match rowid_column.value {
+                    Value::Integer(id) => Ok(id),
+                    _ => Err(sqlite3_ext::Error::Sqlite(
+                        SQLITE_ERROR,
+                        Some("Rowid is not an integer".into()),
+                    )),
+                }?;
+                if current_bucket.rows.len() > 0 {
+                    self.meta_table
+                        .rowid_mapper
+                        .write()
+                        .unwrap()
+                        .push((rowid, current_bucket.partition_name.clone()));
+                    self.internal_rowid_counter += 1;
+                }
+
+                Ok(())
+            } // Successfully advanced to the next row/bucket
             Ok(false) => {
                 // EOF reached, no more rows or buckets to advance to
                 // println!("EOF reached.");
@@ -277,21 +319,24 @@ impl<'cursor> VTabCursor<'cursor> for RangePartitionCursor<'cursor> {
     }
 
     fn rowid(&self) -> ExtResult<i64> {
-        let current_row = self.get_current_row()?;
-        let rowid_column = current_row
-            .columns
-            .iter()
-            .find(|col| col.name == "rowid")
-            .ok_or_else(|| {
-                sqlite3_ext::Error::Sqlite(SQLITE_ERROR, Some("Rowid column not found".into()))
-            })?;
-
-        match rowid_column.value {
-            Value::Integer(id) => Ok(id),
-            _ => Err(sqlite3_ext::Error::Sqlite(
-                SQLITE_ERROR,
-                Some("Rowid is not an integer".into()),
-            )),
-        }
+        println!("self counter: {:#?}", self.internal_rowid_counter);
+        Ok(self.internal_rowid_counter)
+        // let current_internal_row_id = self.meta_table.rowid_mapper.write().unwrap();
+        // let current_row = self.get_current_row()?;
+        // let rowid_column = current_row
+        //     .columns
+        //     .iter()
+        //     .find(|col| col.name == "rowid")
+        //     .ok_or_else(|| {
+        //         sqlite3_ext::Error::Sqlite(SQLITE_ERROR, Some("Rowid column not found".into()))
+        //     })?;
+        //
+        // match rowid_column.value {
+        //     Value::Integer(id) => Ok(id),
+        //     _ => Err(sqlite3_ext::Error::Sqlite(
+        //         SQLITE_ERROR,
+        //         Some("Rowid is not an integer".into()),
+        //     )),
+        // }
     }
 }
