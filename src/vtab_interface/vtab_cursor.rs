@@ -3,49 +3,74 @@ use std::usize;
 
 use super::{PartitionMetaTable, WhereClauses};
 use crate::utils::{aggregate_conditions_to_ranges, Condition};
-use crate::{Lookup, PartitionAccessor};
-use sqlite3_ext::ffi::SQLITE_ERROR;
+use crate::{Lookup, PartitionAccessor, Root};
+use rusqlite::ffi::SQLITE_ERROR;
 use sqlite3_ext::query::Column;
 use sqlite3_ext::vtab::ColumnContext;
 use sqlite3_ext::{vtab::VTabCursor, Value, ValueRef};
 use sqlite3_ext::{FallibleIteratorMut, FromValue, Result as ExtResult};
 
 #[derive(Debug)]
-pub struct RangePartitionCursor<'cursor> {
-    result_iterator_counter: i64,
+pub struct RangePartitionCursor<'vtab> {
     internal_rowid_counter: i64,
-    meta_table: &'cursor PartitionMetaTable<'cursor>,
+    meta_table: &'vtab PartitionMetaTable<'vtab>,
     buckets: Vec<ResultBucket>,
+    current_bucket_index: usize, // current_bucket: Option<&'vtab ResultBucket<'vtab>>,
 }
 
 #[derive(Debug)]
 pub struct ResultBucket {
-    pub partition_index: i64, //index in lookup_table.partitions.
+    pub partition_value: i64, //index in lookup_table.partitions.
     pub partition_name: String,
     pub rows: Vec<ResultRow>,
+    current_row_index: usize,
 }
 impl ResultBucket {
-    fn new(partition_index: i64, rows: Vec<ResultRow>, partition_name: String) -> Self {
-        Self {
-            partition_index,
-            rows,
-            partition_name,
+    fn new(partition_value: i64, partition_name: String, rows: Vec<ResultRow>) -> Self {
+        if rows.is_empty() {
+            panic!()
         }
+
+        Self {
+            partition_value,
+            partition_name,
+            rows,
+            current_row_index: usize::default(),
+        }
+    }
+    fn get_mut_current_row(&mut self) -> Option<&mut ResultRow> {
+        self.rows.get_mut(self.current_row_index)
+    }
+    fn get_current_row(&self) -> Option<&ResultRow> {
+        self.rows.get(self.current_row_index)
+    }
+    fn advance_to_next_row(&mut self) -> Option<&mut ResultRow> {
+        self.current_row_index += 1;
+        self.get_mut_current_row()
     }
 }
 
 #[derive(Debug)]
 pub struct ResultRow {
+    rowid: Value,
     columns: Vec<ResultColumn>,
 }
+
 impl FromIterator<ResultColumn> for ResultRow {
     fn from_iter<T: IntoIterator<Item = ResultColumn>>(iter: T) -> Self {
         let columns: Vec<ResultColumn> = iter.into_iter().collect();
-        Self { columns }
+        let (rowid, c) = {
+            let b = columns.split_at(1);
+            (b.0[0].value.clone(), b.1)
+        };
+        Self {
+            rowid,
+            columns: c.to_vec(),
+        }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResultColumn {
     name: String,
     value: Value,
@@ -57,88 +82,37 @@ impl ResultColumn {
         Ok(Self { name, value })
     }
 }
-impl<'cursor> RangePartitionCursor<'cursor> {
-    pub fn new(meta_table: &'cursor PartitionMetaTable) -> Self {
+impl<'vtab> RangePartitionCursor<'vtab> {
+    pub fn new(meta_table: &'vtab PartitionMetaTable) -> Self {
         Self {
-            result_iterator_counter: i64::default(),
             buckets: Vec::new(),
             meta_table,
             internal_rowid_counter: i64::default(),
+            current_bucket_index: usize::default(), // current_bucket: None,
         }
     }
-    fn get_current_partition(&self) -> ExtResult<(i64, String)> {
-        self.meta_table
-            .partition_interface
-            .get_lookup()
-            .access_current_entry(|(key, value)| (*key, value.clone()))
-            .ok_or_else(|| {
-                sqlite3_ext::Error::Sqlite(
-                    SQLITE_ERROR,
-                    Some("Could not access current partition".into()),
-                )
-            })
+
+    fn get_mut_current_bucket(&mut self) -> Option<&mut ResultBucket> {
+        self.buckets.get_mut(self.current_bucket_index)
     }
-    fn get_current_bucket(&self) -> ExtResult<(usize, &ResultBucket)> {
-        let current_partition = self.get_current_partition()?;
+    fn get_current_bucket(&self) -> Option<&ResultBucket> {
+        self.buckets.get(self.current_bucket_index)
+    }
+    fn get_current_row(&self) -> Option<&ResultRow> {
+        self.get_current_bucket()
+            .and_then(|bucket| bucket.get_current_row())
+    }
+    fn advance_to_next_bucket(&mut self) -> Option<&mut ResultBucket> {
         self.buckets
-            .iter()
-            .enumerate()
-            .find(|(_index, row)| row.partition_index == current_partition.0)
-            .ok_or_else(|| {
-                sqlite3_ext::Error::Sqlite(
-                    SQLITE_ERROR,
-                    Some("Could not find current bucket".into()),
-                )
+            .get_mut(self.current_bucket_index + 1)
+            .map(|bucket| {
+                self.current_bucket_index += 1;
+                bucket
             })
     }
-    fn get_current_row(&self) -> ExtResult<&ResultRow> {
-        let (_index, current_bucket) = self.get_current_bucket()?;
-        current_bucket
-            .rows
-            .get(self.result_iterator_counter as usize)
-            .ok_or_else(|| {
-                sqlite3_ext::Error::Sqlite(
-                    SQLITE_ERROR,
-                    Some("Could not access current row".into()),
-                )
-            })
-    }
-    fn advance_to_next_bucket(&mut self) -> ExtResult<bool> {
-        let current_partition = self.get_current_partition()?;
-        let current_bucket_index = self
-            .buckets
-            .iter()
-            .position(|bucket| bucket.partition_index == current_partition.0)
-            .ok_or_else(|| {
-                sqlite3_ext::Error::Sqlite(SQLITE_ERROR, Some("Current bucket not found".into()))
-            })?;
-
-        if let Some(next_bucket) = self.buckets.get(current_bucket_index + 1) {
-            self.meta_table
-                .partition_interface
-                .get_lookup()
-                .update_current_entry(next_bucket.partition_index);
-            self.result_iterator_counter = 0; // Reset for new bucket
-            Ok(true) // Successfully moved to the next bucket
-        } else {
-            Ok(false) // EOF, no more buckets
-        }
-    }
-    fn advance_to_next_row(&mut self) -> ExtResult<bool> {
-        let (_index, current_bucket) = match self.get_current_bucket() {
-            Ok(v) => v,
-            Err(_err) => return Ok(false), // EOF or error accessing current bucket
-        };
-
-        if let Some(_row) = current_bucket
-            .rows
-            .get((self.result_iterator_counter as usize) + 1)
-        {
-            self.result_iterator_counter += 1;
-            Ok(true) // Successfully advanced to the next row
-        } else {
-            self.advance_to_next_bucket()
-        }
+    fn advance_to_next_row(&mut self) -> Option<&mut ResultRow> {
+        self.get_mut_current_bucket()
+            .and_then(|bucket| bucket.advance_to_next_row())
     }
     fn parse_where_clauses(
         &self,
@@ -146,7 +120,7 @@ impl<'cursor> RangePartitionCursor<'cursor> {
         args: &mut [&mut ValueRef],
     ) -> (String, Vec<Condition>) {
         let where_clauses_serialized = idx_str.unwrap_or("");
-        let where_clauses: &WhereClauses = &ron::from_str(where_clauses_serialized).unwrap();
+        let where_clauses: WhereClauses = ron::from_str(where_clauses_serialized).unwrap();
 
         let lookup_where = where_clauses.get("lookup_table");
         let partition_where = where_clauses.get("partition_table");
@@ -180,24 +154,31 @@ impl<'cursor> RangePartitionCursor<'cursor> {
         (partition_where_str, lookup_conditions)
     }
     fn query_partitions(
-        &self,
+        &mut self,
         partition_where_str: &str,
         lookup_conditions: Vec<Condition>,
         args: &mut [&mut ValueRef],
-    ) -> ExtResult<Vec<ResultBucket>> {
-        let ranges = aggregate_conditions_to_ranges(lookup_conditions);
+    ) -> ExtResult<()> {
+        let ranges = aggregate_conditions_to_ranges(
+            lookup_conditions,
+            self.meta_table
+                .partition_interface
+                .get_root()
+                .get_interval(),
+        );
         let (lower_bound, upper_bound) = ranges
             .get("partition_value")
             .unwrap_or(&(Bound::Unbounded, Bound::Unbounded));
 
-        self.meta_table
+        let buckets: ExtResult<Vec<ResultBucket>> = self
+            .meta_table
             .partition_interface
             .get_lookup()
             .get_partitions_by_range(self.meta_table.connection, *lower_bound, *upper_bound)?
             .iter()
             .try_fold(Vec::new(), |mut acc, (partition_value, partition_name)| {
                 let sql = format!(
-                    "SELECT *, rowid FROM {} {}",
+                    "SELECT rowid, * FROM {} {}",
                     partition_name, partition_where_str
                 );
                 let mut stmt = self.meta_table.connection.prepare(&sql)?;
@@ -220,28 +201,18 @@ impl<'cursor> RangePartitionCursor<'cursor> {
                 if !row_columns.is_empty() {
                     acc.push(ResultBucket::new(
                         *partition_value,
-                        row_columns,
                         partition_name.clone(),
+                        row_columns,
                     ));
                 }
                 Ok(acc)
-            })
-    }
-    fn setup_cursor_state(&mut self, queries: Vec<ResultBucket>) {
-        if let Some(first_query) = queries.first() {
-            self.result_iterator_counter = 0;
-            self.meta_table
-                .partition_interface
-                .get_lookup()
-                .update_current_entry(first_query.partition_index);
-            self.buckets = queries;
-        } else {
-            self.result_iterator_counter = -1;
-        }
+            });
+        self.buckets = buckets?;
+        Ok(())
     }
 }
 
-impl<'cursor> VTabCursor<'cursor> for RangePartitionCursor<'cursor> {
+impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
     fn filter(
         &mut self,
         _idx_num: i32,
@@ -249,94 +220,54 @@ impl<'cursor> VTabCursor<'cursor> for RangePartitionCursor<'cursor> {
         args: &mut [&mut ValueRef],
     ) -> ExtResult<()> {
         let (partition_where_str, lookup_conditions) = self.parse_where_clauses(idx_str, args);
-        let queries = self.query_partitions(&partition_where_str, lookup_conditions, args)?;
-        self.setup_cursor_state(queries);
+        self.query_partitions(&partition_where_str, lookup_conditions, args)?;
+
         Ok(())
     }
 
     fn next(&mut self) -> ExtResult<()> {
-        match self.advance_to_next_row() {
-            Ok(true) => {
-                let (current_partition, (current_bucket_index, current_bucket), current_row) = (
-                    self.get_current_partition().unwrap(),
-                    self.get_current_bucket().unwrap(),
-                    self.get_current_row().unwrap(),
-                );
-                let rowid_column = current_row
-                    .columns
-                    .iter()
-                    .find(|col| col.name == "rowid")
-                    .ok_or_else(|| {
-                        sqlite3_ext::Error::Sqlite(
-                            SQLITE_ERROR,
-                            Some("Rowid column not found".into()),
-                        )
-                    })?;
+        let mut next_row = self.advance_to_next_row();
+        if next_row.is_none() {
+            next_row = self
+                .advance_to_next_bucket()
+                .and_then(|bucket| bucket.get_mut_current_row());
+        };
 
-                let rowid = match rowid_column.value {
-                    Value::Integer(id) => Ok(id),
-                    _ => Err(sqlite3_ext::Error::Sqlite(
-                        SQLITE_ERROR,
-                        Some("Rowid is not an integer".into()),
-                    )),
-                }?;
-                if current_bucket.rows.len() > 0 {
-                    self.meta_table
-                        .rowid_mapper
-                        .write()
-                        .unwrap()
-                        .push((rowid, current_bucket.partition_name.clone()));
-                    self.internal_rowid_counter += 1;
-                }
-
-                Ok(())
-            } // Successfully advanced to the next row/bucket
-            Ok(false) => {
-                // EOF reached, no more rows or buckets to advance to
-                // println!("EOF reached.");
-                self.result_iterator_counter = -1; // Optionally mark as EOF
-                Ok(())
-            }
-            Err(e) => {
-                // println!("Error advancing to next row/bucket: {:?}", e);
-                Err(e)
-            }
+        if next_row.is_some() {
+            self.internal_rowid_counter += 1;
         }
+        Ok(())
     }
 
     fn eof(&self) -> bool {
-        let eof = self.result_iterator_counter == -1;
-        eof
+        self.get_current_row().is_none()
     }
     fn column(&self, idx: usize, c: &ColumnContext) -> ExtResult<()> {
-        let current_row = self.get_current_row()?;
-        let column = current_row.columns.get(idx).ok_or_else(|| {
-            sqlite3_ext::Error::Sqlite(SQLITE_ERROR, Some("Could not access column".into()))
-        })?;
-        c.set_result(column.value.clone())?;
-
+        let column_value = self
+            .get_current_row()
+            .map(|row| &row.columns)
+            .and_then(|columns| columns.get(idx))
+            .map(|column| column.value.clone());
+        if let Some(value) = column_value {
+            println!("value : {:#?}", value);
+            c.set_result(value)?;
+        }
+        //
         Ok(())
     }
 
     fn rowid(&self) -> ExtResult<i64> {
-        println!("self counter: {:#?}", self.internal_rowid_counter);
+        let rowid_column = self.get_current_row().map(|row| row.rowid.clone());
+
+        let partition_name = &self.get_current_bucket().unwrap().partition_name;
+        if let Some(column) = rowid_column {
+            self.meta_table
+                .rowid_mapper
+                .write()
+                .unwrap()
+                .push((column.clone(), partition_name.to_string()));
+        }
+
         Ok(self.internal_rowid_counter)
-        // let current_internal_row_id = self.meta_table.rowid_mapper.write().unwrap();
-        // let current_row = self.get_current_row()?;
-        // let rowid_column = current_row
-        //     .columns
-        //     .iter()
-        //     .find(|col| col.name == "rowid")
-        //     .ok_or_else(|| {
-        //         sqlite3_ext::Error::Sqlite(SQLITE_ERROR, Some("Rowid column not found".into()))
-        //     })?;
-        //
-        // match rowid_column.value {
-        //     Value::Integer(id) => Ok(id),
-        //     _ => Err(sqlite3_ext::Error::Sqlite(
-        //         SQLITE_ERROR,
-        //         Some("Rowid is not an integer".into()),
-        //     )),
-        // }
     }
 }

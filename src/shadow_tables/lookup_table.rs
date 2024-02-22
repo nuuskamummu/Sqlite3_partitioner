@@ -168,8 +168,8 @@ impl Lookup<i64> for LookupTable<i64> {
     }
 
     fn update_current_entry(&self, new_key: i64) {
-        let mut current_key = self.current_partition.write().unwrap(); // Obtain write lock
-        *current_key = new_key; // Update the current key
+        let mut current_key = self.current_partition.write().unwrap();
+        *current_key = new_key;
     }
     // Method to access an entry
     fn access_current_entry<F>(&self, access_fn: F) -> Option<(i64, String)>

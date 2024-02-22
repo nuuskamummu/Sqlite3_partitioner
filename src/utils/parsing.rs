@@ -1,6 +1,10 @@
-use std::{collections::HashMap, i64};
+use std::{
+    cmp::{max, min},
+    collections::HashMap,
+    i64,
+};
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 use regex::Regex;
 use sqlite3_ext::{ffi::SQLITE_FORMAT, vtab::ConstraintOp, Value, ValueType};
 
@@ -30,20 +34,64 @@ pub fn parse_value_type(sqlite_type: &str) -> Result<ValueType, String> {
         _ => Err(format!("Cannot parse input type :'{}'", sqlite_type)),
     }
 }
-static DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
-/// Accepts a [&str] with the format [`DATETIME_FORMAT`]
-pub fn parse_datetime_to_epoch(datetime_str: &str) -> sqlite3_ext::Result<i64> {
-    // This is a simplified example; you'll need to adjust the format according to your input
-    match NaiveDateTime::parse_from_str(datetime_str, DATETIME_FORMAT) {
-        Ok(result) => Ok(result.timestamp()),
-        Err(err) => Err(sqlite3_ext::Error::Sqlite(
+
+static DATETIME_FORMATS: &[&str] = &[
+    "%Y-%m-%d %H:%M:%S",   // Standard ISO 8601 datetime
+    "%Y-%m-%d %H:%M",      // ISO 8601 without seconds
+    "%Y-%m-%d",            // ISO 8601 date only
+    "%d-%m-%Y %H:%M:%S",   // European date with time
+    "%d-%m-%Y %H:%M",      // European date without seconds
+    "%d-%m-%Y",            // European date
+    "%m/%d/%Y %H:%M:%S",   // US date with time
+    "%m/%d/%Y %H:%M",      // US date without seconds
+    "%m/%d/%Y",            // US date
+    "%Y%m%d%H%M%S",        // Compact datetime without separators
+    "%Y%m%d",              // Compact date without separators
+    "%Y-%m-%dT%H:%M:%SZ",  // ISO 8601 datetime with Zulu (UTC) time zone
+    "%Y-%m-%dT%H:%M:%S%z", // ISO 8601 datetime with numeric time zone
+    "%I:%M:%S %p",         // 12-hour clock time with AM/PM
+    "%I:%M %p",            // 12-hour clock time without seconds
+    "%B %d, %Y %H:%M:%S",  // Full month name, day, year, time
+    "%b %d, %Y %H:%M:%S",  // Abbreviated month name, day, year, time
+                           // Add more formats as needed
+];
+
+pub fn parse_datetime_from_value(value: Value) -> sqlite3_ext::Result<i64> {
+    match value {
+        Value::Text(value) => parse_datetime_to_epoch(&value.trim()),
+        _ => Err(sqlite3_ext::Error::Sqlite(
             SQLITE_FORMAT,
             Some(format!(
-                "Could not parse string: {} to UNIX epoch. {}",
-                datetime_str, err
+                "Could not parse value: {:#?} to UNIX epoch.",
+                value
             )),
         )),
     }
+}
+
+fn parse_datetime_to_epoch(datetime_str: &str) -> sqlite3_ext::Result<i64> {
+    for &format in DATETIME_FORMATS.iter() {
+        let trimmed_format = format.trim();
+        // Attempt to parse as NaiveDateTime first
+        if let Ok(datetime) = NaiveDateTime::parse_from_str(datetime_str, trimmed_format) {
+            return Ok(datetime.timestamp());
+        }
+        // Attempt to parse as NaiveDate if NaiveDateTime parsing fails
+        if let Ok(date) = NaiveDate::parse_from_str(datetime_str, trimmed_format) {
+            // Assuming start of the day for date-only entries
+            let datetime = date.and_hms_opt(0, 0, 0);
+            return Ok(datetime.unwrap().timestamp());
+        }
+    }
+
+    // If all parsing attempts fail, return an error
+    Err(sqlite3_ext::Error::Sqlite(
+        SQLITE_FORMAT,
+        Some(format!(
+            "Could not parse string: '{}' to UNIX epoch.",
+            datetime_str
+        )),
+    ))
 }
 
 /// Parses an incoming [sqlite3_ext::ValueType] to UNIX epoch.
@@ -188,100 +236,85 @@ pub struct Condition {
 /// - A HashMap where each key is a column name and its value is a tuple representing the range as lower and upper bounds.
 pub fn aggregate_conditions_to_ranges(
     conditions: Vec<Condition>,
+    interval: i64,
 ) -> HashMap<String, (Bound<i64>, Bound<i64>)> {
     let mut ranges: HashMap<String, (Bound<i64>, Bound<i64>)> = HashMap::new();
 
     for condition in conditions {
-        if let Value::Integer(value) = condition.value {
-            ranges
-                .entry(condition.column.clone())
-                .and_modify(|e| {
-                    update_bound(e, &condition.operator, value);
-                })
-                .or_insert_with(|| initial_bound(&condition.operator, value));
-        }
-        // Handling of non-integer values omitted for brevity; could log, error, or skip.
+        let partition_start = calculate_bucket(&condition.value, interval).unwrap(); //TODO handle
+                                                                                     //error
+
+        ranges
+            .entry(condition.column.clone())
+            .and_modify(|e| {
+                update_bound(e, &condition.operator, partition_start, interval);
+            })
+            .or_insert_with(|| initial_bound(&condition.operator, partition_start, interval));
     }
 
     ranges
 }
-/// Updates the range bounds based on the condition operator and value.
-///
-/// Parameters:
-/// - `range`: The current range bounds to update.
-/// - `operator`: The condition operator.
-/// - `value`: The integer value for the condition.
-fn update_bound(range: &mut (Bound<i64>, Bound<i64>), operator: &ConstraintOp, value: i64) {
+fn update_bound(
+    range: &mut (Bound<i64>, Bound<i64>),
+    operator: &ConstraintOp,
+    value: i64,
+    interval: i64,
+) {
     match operator {
-        ConstraintOp::GT => range.0 = max_bound(range.0, Excluded(value)),
-        ConstraintOp::LT => range.1 = min_bound(range.1, Excluded(value)),
-        ConstraintOp::LE => range.1 = min_bound(range.1, Included(value)),
-        ConstraintOp::Eq => {
-            range.0 = Included(value);
-            range.1 = Included(value);
+        ConstraintOp::GT | ConstraintOp::GE => {
+            let lower_bound = Excluded(value);
+            range.0 = less_restrictive_bound(range.0, lower_bound);
         }
-        _ => {} // Other operators could be handled here as needed
+        ConstraintOp::LT => {
+            let upper_bound = Excluded(value + interval);
+            range.1 = more_restrictive_bound(range.1, upper_bound);
+        }
+        ConstraintOp::LE => {
+            let upper_bound = Included(value + interval);
+            range.1 = more_restrictive_bound(range.1, upper_bound);
+        }
+        ConstraintOp::Eq => {
+            let bound = Included(value);
+            range.0 = more_restrictive_bound(range.0, bound);
+            range.1 = more_restrictive_bound(range.1, bound);
+        }
+        _ => {} // Handle other operators if necessary
     }
 }
-/// Determines the initial bounds based on the first condition for a column.
-///
-/// Parameters:
-/// - `operator`: The condition operator.
-/// - `value`: The integer value for the condition.
-///
-/// Returns:
-/// - A tuple representing the initial range as lower and upper bounds.
-fn initial_bound(operator: &ConstraintOp, value: i64) -> (Bound<i64>, Bound<i64>) {
+fn initial_bound(operator: &ConstraintOp, value: i64, interval: i64) -> (Bound<i64>, Bound<i64>) {
     match operator {
-        ConstraintOp::GT => (Excluded(value), Unbounded),
-        ConstraintOp::LT => (Unbounded, Excluded(value)),
-        ConstraintOp::LE => (Unbounded, Included(value)),
+        ConstraintOp::GT | ConstraintOp::GE => (Excluded(value), Unbounded),
+        ConstraintOp::LT => (Unbounded, Excluded(value + interval)),
+        ConstraintOp::LE => (Unbounded, Included(value + interval)),
         ConstraintOp::Eq => (Included(value), Included(value)),
-        // Default case to handle other operators, assuming full range
-        _ => (Unbounded, Unbounded),
+        _ => (Unbounded, Unbounded), // Default case
     }
 }
-
-/// Finds the maximum of two lower bounds.
-///
-/// Parameters:
-/// - `a`: The first lower bound.
-/// - `b`: The second lower bound.
-///
-/// Returns:
-/// - The more restrictive of the two bounds.
-fn max_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
+// Choose the less restrictive (i.e., broader) lower bound
+fn less_restrictive_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
     match (a, b) {
-        (Unbounded, _) => b,
-        (_, Unbounded) => a,
-        (Included(a_val), Included(b_val)) => Included(std::cmp::max(a_val, b_val)),
-        (Excluded(a_val), Excluded(b_val)) => Excluded(std::cmp::max(a_val, b_val)),
+        (Unbounded, _) | (_, Unbounded) => Unbounded,
+        (Included(a_val), Included(b_val)) => Included(min(a_val, b_val)),
+        (Excluded(a_val), Excluded(b_val)) => Excluded(min(a_val, b_val)),
         (Excluded(a_val), Included(b_val)) | (Included(a_val), Excluded(b_val)) => {
-            if a_val >= b_val {
-                Excluded(a_val)
+            if a_val <= b_val {
+                Included(min(a_val, b_val))
             } else {
-                Included(b_val)
+                Excluded(min(a_val, b_val))
             }
         }
     }
 }
 
-/// Finds the minimum of two upper bounds.
-///
-/// Parameters:
-/// - `a`: The first upper bound.
-/// - `b`: The second upper bound.
-///
-/// Returns:
-/// - The more restrictive of the two bounds.
-fn min_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
+// Keep the existing logic for more restrictive bounds as it correctly narrows down the range
+fn more_restrictive_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
     match (a, b) {
         (Unbounded, _) => b,
         (_, Unbounded) => a,
-        (Included(a_val), Included(b_val)) => Included(std::cmp::min(a_val, b_val)),
-        (Excluded(a_val), Excluded(b_val)) => Excluded(std::cmp::min(a_val, b_val)),
+        (Included(a_val), Included(b_val)) => Included(max(a_val, b_val)),
+        (Excluded(a_val), Excluded(b_val)) => Excluded(max(a_val, b_val)),
         (Excluded(a_val), Included(b_val)) | (Included(a_val), Excluded(b_val)) => {
-            if a_val <= b_val {
+            if a_val >= b_val {
                 Excluded(a_val)
             } else {
                 Included(b_val)

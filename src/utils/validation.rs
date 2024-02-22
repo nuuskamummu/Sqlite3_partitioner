@@ -4,7 +4,7 @@ use crate::{
     error::TableError, types::PartitionAccessor, ColumnDeclaration, Lookup, Partition, Template,
 };
 
-use super::parsing::value_type_to_string;
+use super::{parse_to_unix_epoch, parsing::value_type_to_string};
 
 /// Validates and maps columns from an insert or update operation against the column definitions
 /// in a table partition, ensuring type compatibility.
@@ -30,7 +30,11 @@ pub fn validate_and_map_columns<'vtab>(
         .enumerate()
         .map(|(i, &v)| {
             let reference_column = &column_declarations[i];
-            if &v.value_type() == reference_column.get_value_type() {
+
+            if &v.value_type() == reference_column.get_value_type()
+                || (reference_column.get_type().to_uppercase() == "TIMESTAMP"
+                    && parse_to_unix_epoch(&v.to_owned().unwrap()).is_ok())
+            {
                 Ok((reference_column.get_name().to_string(), v.to_owned()?))
             } else {
                 Err(TableError::ColumnTypeMismatch {

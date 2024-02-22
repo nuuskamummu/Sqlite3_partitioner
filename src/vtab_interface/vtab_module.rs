@@ -1,3 +1,4 @@
+use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -7,6 +8,7 @@ use crate::{
     vtab_interface::WhereClause,
 };
 use crate::{Partition, PartitionAccessor, Template};
+use sqlite3_ext::query::ToParam;
 use sqlite3_ext::{sqlite3_ext_vtab, vtab::VTab};
 use sqlite3_ext::{
     vtab::{ChangeInfo, ChangeType, CreateVTab, UpdateVTab, VTabConnection},
@@ -28,7 +30,7 @@ fn group_by_string(vec: Vec<(i64, String)>) -> HashMap<String, Vec<i64>> {
 pub struct PartitionMetaTable<'vtab> {
     pub partition_interface: Partition<i64>,
     pub connection: &'vtab Connection,
-    pub rowid_mapper: &'vtab RwLock<Vec<(i64, String)>>,
+    pub rowid_mapper: &'vtab RwLock<Vec<(Value, String)>>,
 }
 impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
     fn create(
@@ -60,16 +62,20 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
             ChangeType::Insert => insert(&self.partition_interface, &self.connection, info)?,
             ChangeType::Update => unimplemented!(),
             ChangeType::Delete => {
-                let a = self.rowid_mapper.read().unwrap();
+                let rowid_mapper = self.rowid_mapper.read().unwrap();
                 let id = info.rowid().get_i64();
-                match a.get(id as usize) {
-                    Some(v) => {
-                        let sql = delete(v.1.clone(), v.0);
-                        self.connection.execute(&sql.as_ref().unwrap(), ()).unwrap();
-                        println!("{:#?}, {:#?}", v, &sql);
+                match rowid_mapper.get(id as usize) {
+                    Some((db_rowid, partition_name)) => {
+                        let sql = delete(partition_name);
+                        let mut stmt = self.connection.prepare(&sql)?;
+                        db_rowid.clone().bind_param(stmt.borrow_mut(), 1);
+                        stmt.execute(());
                         ()
                     }
-                    None => (),
+                    None => {
+                        println!("no id, {:#?}", id);
+                        ()
+                    }
                 }
 
                 // for arg in info.args_mut() {
@@ -107,7 +113,7 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
     }
 }
 impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
-    type Aux = RwLock<Vec<(i64, String)>>; //internal rowid. rowid from table, table name
+    type Aux = RwLock<Vec<(Value, String)>>; //internal rowid. rowid from table, table name
     type Cursor = RangePartitionCursor<'vtab>;
 
     fn connect(

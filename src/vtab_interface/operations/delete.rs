@@ -11,7 +11,7 @@ pub fn prepare_delete_statement(partition_name: &str, num_columns: usize) -> Str
         partition_name, placeholders
     )
 }
-pub fn delete<'vtab>(partition_name: String, value: i64) -> sqlite3_ext::Result<String> {
+pub fn delete<'vtab>(partition_name: &String) -> String {
     // let (_partition_value, partition_name) = partition
     //     .get_lookup()
     //     .access_current_entry(|(partition_value, partition_name)| {
@@ -22,9 +22,9 @@ pub fn delete<'vtab>(partition_name: String, value: i64) -> sqlite3_ext::Result<
     //     .take(values_count) // Take as many "?" as there are elements in the vec.
     //     .collect::<Vec<&str>>()
     //     .join(", ");
-    let sql = format!("DELETE FROM {} WHERE ROWID IN ({})", partition_name, value);
+    let sql = format!("DELETE FROM {} WHERE ROWID IN (?)", partition_name);
 
-    Ok(sql)
+    sql
 }
 pub fn update<'vtab>(
     partition: &'vtab Partition<i64>,
