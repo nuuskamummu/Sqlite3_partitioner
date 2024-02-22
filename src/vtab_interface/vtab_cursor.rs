@@ -26,17 +26,17 @@ pub struct ResultBucket {
     current_row_index: usize,
 }
 impl ResultBucket {
-    fn new(partition_value: i64, partition_name: String, rows: Vec<ResultRow>) -> Self {
+    fn new(partition_value: i64, partition_name: &String, rows: Vec<ResultRow>) -> Option<Self> {
         if rows.is_empty() {
-            panic!()
+            return None;
         }
 
-        Self {
+        Some(Self {
             partition_value,
-            partition_name,
+            partition_name: partition_name.to_owned(),
             rows,
             current_row_index: usize::default(),
-        }
+        })
     }
     fn get_mut_current_row(&mut self) -> Option<&mut ResultRow> {
         self.rows.get_mut(self.current_row_index)
@@ -58,14 +58,14 @@ pub struct ResultRow {
 
 impl FromIterator<ResultColumn> for ResultRow {
     fn from_iter<T: IntoIterator<Item = ResultColumn>>(iter: T) -> Self {
-        let columns: Vec<ResultColumn> = iter.into_iter().collect();
-        let (rowid, c) = {
-            let b = columns.split_at(1);
-            (b.0[0].value.clone(), b.1)
-        };
+        let mut iter = iter.into_iter();
+        let first_column = iter
+            .next()
+            .expect("ResultRow must have at least one column");
+
         Self {
-            rowid,
-            columns: c.to_vec(),
+            rowid: first_column.value,
+            columns: iter.collect(),
         }
     }
 }
@@ -120,12 +120,13 @@ impl<'vtab> RangePartitionCursor<'vtab> {
         args: &mut [&mut ValueRef],
     ) -> (String, Vec<Condition>) {
         let where_clauses_serialized = idx_str.unwrap_or("");
-        let where_clauses: WhereClauses = ron::from_str(where_clauses_serialized).unwrap();
 
-        let lookup_where = where_clauses.get("lookup_table");
-        let partition_where = where_clauses.get("partition_table");
-
-        let lookup_conditions = lookup_where.map_or(Vec::new(), |constraints| {
+        let where_clauses: Option<WhereClauses> = ron::from_str(where_clauses_serialized).ok();
+        let (lookup_where, partition_where) = match &where_clauses {
+            Some(clauses) => (clauses.get("lookup_table"), clauses.get("partition_table")),
+            None => (None, None),
+        };
+        let lookup_conditions = lookup_where.map_or(Vec::default(), |constraints| {
             constraints
                 .iter()
                 .filter_map(|constraint| {
@@ -198,12 +199,10 @@ impl<'vtab> RangePartitionCursor<'vtab> {
                     }
                 }
 
-                if !row_columns.is_empty() {
-                    acc.push(ResultBucket::new(
-                        *partition_value,
-                        partition_name.clone(),
-                        row_columns,
-                    ));
+                if let Some(bucket) =
+                    ResultBucket::new(*partition_value, partition_name, row_columns)
+                {
+                    acc.push(bucket);
                 }
                 Ok(acc)
             });
@@ -226,14 +225,20 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
     }
 
     fn next(&mut self) -> ExtResult<()> {
-        let mut next_row = self.advance_to_next_row();
-        if next_row.is_none() {
-            next_row = self
+        // Attempt to advance to the next row within the current bucket.
+        // If there's no next row (None is returned), attempt to move to the next bucket.
+        if self.advance_to_next_row().is_none() {
+            // Attempt to move to the next bucket and then to its first row.
+            // If successful, it means we've advanced to a new bucket, so we increment the counter.
+            if let Some(_row) = self
                 .advance_to_next_bucket()
-                .and_then(|bucket| bucket.get_mut_current_row());
-        };
-
-        if next_row.is_some() {
+                .and_then(|bucket| bucket.get_current_row())
+            // .get_mut_current_row()
+            {
+                self.internal_rowid_counter += 1;
+            }
+        } else {
+            // Successfully moved to the next row within the same bucket, increment the counter.
             self.internal_rowid_counter += 1;
         }
         Ok(())
@@ -247,10 +252,10 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
             .get_current_row()
             .map(|row| &row.columns)
             .and_then(|columns| columns.get(idx))
-            .map(|column| column.value.clone());
+            .map(|column| &column.value);
         if let Some(value) = column_value {
             println!("value : {:#?}", value);
-            c.set_result(value)?;
+            c.set_result(value.to_owned())?;
         }
         //
         Ok(())
@@ -259,13 +264,20 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
     fn rowid(&self) -> ExtResult<i64> {
         let rowid_column = self.get_current_row().map(|row| row.rowid.clone());
 
-        let partition_name = &self.get_current_bucket().unwrap().partition_name;
+        let partition_name = match &self.get_current_bucket() {
+            Some(bucket) => &bucket.partition_name,
+            None => {
+                return Err(sqlite3_ext::Error::Sqlite(
+                    1,
+                    Some("Could not access current bucket".to_owned()),
+                ))
+            }
+        };
         if let Some(column) = rowid_column {
-            self.meta_table
-                .rowid_mapper
-                .write()
-                .unwrap()
-                .push((column.clone(), partition_name.to_string()));
+            let mut rowid_mapper = self.meta_table.rowid_mapper.write().map_err(|e| {
+                sqlite3_ext::Error::Sqlite(1, Some(format!("Lock acquisition failed: {}", e)))
+            })?;
+            rowid_mapper.push((column.clone(), partition_name.to_string()));
         }
 
         Ok(self.internal_rowid_counter)
