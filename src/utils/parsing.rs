@@ -58,7 +58,7 @@ static DATETIME_FORMATS: &[&str] = &[
 
 pub fn parse_datetime_from_value(value: Value) -> sqlite3_ext::Result<i64> {
     match value {
-        Value::Text(value) => parse_datetime_to_epoch(&value.trim()),
+        Value::Text(value) => parse_datetime_to_epoch(value.trim()),
         _ => Err(sqlite3_ext::Error::Sqlite(
             SQLITE_FORMAT,
             Some(format!(
@@ -103,7 +103,7 @@ pub fn parse_to_unix_epoch(value: &Value) -> sqlite3_ext::Result<i64> {
         Value::Text(datetime_str) => parse_datetime_to_epoch(datetime_str),
         Value::Blob(_) | Value::Null => Err(sqlite3_ext::Error::Sqlite(
             SQLITE_FORMAT,
-            Some(format!("Could not parse value to UNIX epoch")),
+            Some("Could not parse value to UNIX epoch".to_string()),
         )),
     }
 }

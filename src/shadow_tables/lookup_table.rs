@@ -121,11 +121,6 @@ pub trait Lookup<T> {
         from: Bound<T>,
         to: Bound<T>,
     ) -> Result<Vec<(T, String)>>;
-
-    fn update_current_entry(&self, new_key: T);
-    fn access_current_entry<F>(&self, access_fn: F) -> Option<(T, String)>
-    where
-        F: FnOnce((&T, &String)) -> (T, String);
 }
 #[derive(Debug, Clone)]
 /// Represents a partition table with a specific name and value.
@@ -139,7 +134,6 @@ pub struct PartitionTable {
 pub struct LookupTable<T> {
     base_name: String,
     pub partitions: RwLock<BTreeMap<T, String>>,
-    current_partition: RwLock<T>,
 }
 impl Lookup<i64> for LookupTable<i64> {
     /// Creates a new `LookupTable` instance with a specified base name and initial partitions.
@@ -163,24 +157,9 @@ impl Lookup<i64> for LookupTable<i64> {
         Ok(LookupTable {
             partitions: partition_tree,
             base_name: name.to_string(),
-            current_partition: RwLock::default(),
         })
     }
 
-    fn update_current_entry(&self, new_key: i64) {
-        let mut current_key = self.current_partition.write().unwrap();
-        *current_key = new_key;
-    }
-    // Method to access an entry
-    fn access_current_entry<F>(&self, access_fn: F) -> Option<(i64, String)>
-    where
-        F: FnOnce((&i64, &String)) -> (i64, String),
-    {
-        let current_key = self.current_partition.read().unwrap(); // Obtain read lock for key
-        let map = self.partitions.read().unwrap(); // Obtain read lock for map
-        map.get_key_value(&*current_key)
-            .map(|(key, value)| access_fn((key, value)))
-    }
     /// Executes the SQL query to create the lookup table in the specified database connection.
     ///
     /// # Parameters
@@ -314,17 +293,13 @@ impl Lookup<i64> for LookupTable<i64> {
             )
         })?;
         borrowed_partitions.clear();
-        let local_partition_values = borrowed_partitions
-            .keys()
-            .map(|key| key.clone())
-            .collect::<Vec<i64>>();
+        let local_partition_values = borrowed_partitions.keys().cloned().collect::<Vec<i64>>();
 
-        let variadric_params = local_partition_values
-            .clone()
-            .into_iter()
-            .map(|_| "?")
+        let variadric_params = std::iter::repeat("?")
+            .take(local_partition_values.len()) // Directly use the length of the keys vector
             .collect::<Vec<&str>>()
             .join(",");
+
         let sql = format!(
             "SELECT * FROM {} WHERE partition_value NOT IN ({}) AND  {};",
             self.get_lookup_table_name(),
@@ -426,13 +401,12 @@ impl Lookup<i64> for LookupTable<i64> {
     fn insert(&self, db: &Connection, partition_value: i64) -> Result<String> {
         let partition_table_name = format!("{}_{}", self.base_name, partition_value);
 
-        let result =
-            Connection::prepare(db, &self.insert_query())?.execute(|stmt: &mut Statement| {
-                partition_table_name.bind_param(stmt, 1)?;
-                partition_value.bind_param(stmt, 2)?;
+        Connection::prepare(db, &self.insert_query())?.execute(|stmt: &mut Statement| {
+            partition_table_name.bind_param(stmt, 1)?;
+            partition_value.bind_param(stmt, 2)?;
 
-                Ok(())
-            });
+            Ok(())
+        })?;
 
         let mut borrowed_partitions = self.partitions.write().map_err(|err| {
             sqlite3_ext::Error::Sqlite(

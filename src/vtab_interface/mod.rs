@@ -75,11 +75,7 @@ impl FromIterator<(String, Vec<WhereClause>)> for WhereClauses {
         let mut data: HashMap<String, Vec<WhereClause>> = HashMap::new();
 
         for (key, clauses) in iter {
-            for clause in clauses {
-                data.entry(key.to_string())
-                    .or_insert_with(Vec::new)
-                    .push(clause);
-            }
+            data.entry(key).or_default().extend(clauses);
         }
 
         WhereClauses(data)
@@ -89,10 +85,9 @@ impl Display for WhereClause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} {} {}",
+            "{} {} ?",
             self.column_name,
             ConstraintOpDef::from(self.operator),
-            "?"
         )
     }
 }

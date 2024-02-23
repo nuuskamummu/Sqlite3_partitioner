@@ -2,6 +2,7 @@ use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use crate::operations::delete::update;
 use crate::vtab_interface::vtab_cursor::*;
 use crate::{
     operations::{delete::delete, insert::insert},
@@ -18,19 +19,12 @@ use sqlite3_ext::{FromValue, Value};
 
 use super::{construct_where_clause, create_partition};
 
-fn group_by_string(vec: Vec<(i64, String)>) -> HashMap<String, Vec<i64>> {
-    let mut map: HashMap<String, Vec<i64>> = HashMap::new();
-    for (num, s) in vec {
-        map.entry(s).or_insert_with(Vec::new).push(num);
-    }
-    map
-}
 #[derive(Debug)]
 #[sqlite3_ext_vtab(StandardModule, UpdateVTab)]
 pub struct PartitionMetaTable<'vtab> {
     pub partition_interface: Partition<i64>,
     pub connection: &'vtab Connection,
-    pub rowid_mapper: &'vtab RwLock<Vec<(Value, String)>>,
+    pub rowid_mapper: &'vtab RwLock<HashMap<i64, (Value, String)>>,
 }
 impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
     fn create(
@@ -53,67 +47,58 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
         ))
     }
     fn destroy(&mut self) -> ExtResult<()> {
+        // let drop_partitions = format!()
         Ok(())
     }
 }
 impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
     fn update(&'vtab self, info: &mut ChangeInfo) -> ExtResult<i64> {
         let (sql, params) = match info.change_type() {
-            ChangeType::Insert => insert(&self.partition_interface, &self.connection, info)?,
-            ChangeType::Update => unimplemented!(),
-            ChangeType::Delete => {
-                let rowid_mapper = self.rowid_mapper.read().unwrap();
-                let id = info.rowid().get_i64();
-                match rowid_mapper.get(id as usize) {
-                    Some((db_rowid, partition_name)) => {
-                        let sql = delete(partition_name);
-                        let mut stmt = self.connection.prepare(&sql)?;
-                        db_rowid.clone().bind_param(stmt.borrow_mut(), 1);
-                        stmt.execute(());
-                        ()
-                    }
-                    None => {
-                        println!("no id, {:#?}", id);
-                        ()
-                    }
+            ChangeType::Insert => insert(&self.partition_interface, self.connection, info)?,
+            ChangeType::Update => {
+                let rowid_mapper = self.rowid_mapper.read().map_err(|e| {
+                    sqlite3_ext::Error::Sqlite(1, Some(format!("Lock acquisition failed: {}", e)))
+                })?;
+                let id = info.rowid_mut().get_i64();
+                if let Some((db_rowid, partition_name)) = rowid_mapper.get(&id) {
+                    let (sql, mut values) =
+                        update(partition_name, &self.partition_interface, info.args_mut());
+                    let mut stmt = self.connection.prepare(&sql)?;
+                    values.iter_mut().enumerate().for_each(|(index, value)| {
+                        value
+                            .bind_param(stmt.borrow_mut(), (index + 1) as i32)
+                            .unwrap();
+                    });
+
+                    db_rowid
+                        .clone()
+                        .bind_param(stmt.borrow_mut(), (values.len() + 1) as i32)?;
+                    stmt.execute(())?;
                 }
 
-                // for arg in info.args_mut() {
-                //     println!("arg: {:#?}", arg);
-                // }
-                // println!("info : {:#?}", info);
-                // for (index, (key, value)) in group_by_string(
-                //     self.rowid_mapper
-                //         .read()
-                //         .unwrap()
-                //         .clone()
-                //         .into_iter()
-                //         .collect::<Vec<(i64, String)>>(),
-                // )
-                // .iter()
-                // .enumerate()
-                // {
-                //     let first_index = value.first().unwrap();
-                //     let last_index = value.last().unwrap();
-                //     let mut current_values: Vec<Value> = Vec::default();
-                //     &info.args()[(*first_index as usize)..(*last_index as usize)]
-                //         .iter()
-                //         .for_each(|&arg| current_values.push(arg.to_owned().unwrap()));
-                //     let sql = delete(key.to_string(), current_values.len());
-                //     match self.connection.execute(&sql.unwrap(), current_values) {
-                //         Ok(_) => return Ok(1),
-                //         Err(_) => panic!(),
-                //     }
-                // }
-                return Ok(1);
+                return Ok(id);
+            }
+            ChangeType::Delete => {
+                let rowid_mapper = self.rowid_mapper.write().map_err(|e| {
+                    sqlite3_ext::Error::Sqlite(1, Some(format!("Lock acquisition failed: {}", e)))
+                })?;
+                let id = info.rowid().get_i64();
+                if let Some((db_rowid, partition_name)) = rowid_mapper.get(&id) {
+                    let sql = delete(partition_name);
+                    let mut stmt = self.connection.prepare(&sql)?;
+                    db_rowid.clone().bind_param(stmt.borrow_mut(), 1)?;
+                    stmt.execute(())?;
+                }
+
+                return Ok(id);
             }
         };
 
-        Ok(self.connection.execute(&sql, params)?)
+        self.connection.execute(&sql, params)
     }
 }
 impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
-    type Aux = RwLock<Vec<(Value, String)>>; //internal rowid. rowid from table, table name
+    type Aux = RwLock<HashMap<i64, (Value, String)>>; //internal rowid. rowid from table, table name
     type Cursor = RangePartitionCursor<'vtab>;
 
     fn connect(
@@ -174,6 +159,10 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
         Ok(())
     }
     fn disconnect(&mut self) -> ExtResult<()> {
+        let mut rowid_mapper = self.rowid_mapper.write().map_err(|e| {
+            sqlite3_ext::Error::Sqlite(1, Some(format!("Lock acquisition failed: {}", e)))
+        })?;
+        rowid_mapper.clear();
         Ok(())
     }
 }

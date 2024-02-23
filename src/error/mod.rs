@@ -10,10 +10,6 @@ pub enum TableError {
     // Other error types as needed
 }
 
-pub enum LookupError {
-    LockError(&'static str),
-}
-
 impl From<sqlite3_ext::Error> for TableError {
     fn from(e: sqlite3_ext::Error) -> Self {
         TableError::SqlError(e)

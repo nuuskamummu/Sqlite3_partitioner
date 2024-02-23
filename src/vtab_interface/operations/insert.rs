@@ -18,7 +18,7 @@ pub fn insert<'vtab>(
         })?;
 
     let bucket = calculate_bucket(&partition_column.1, partition.get_root().get_interval())?;
-    let partition_name: String = resolve_partition_name(&partition, connection, bucket)?;
+    let partition_name: String = resolve_partition_name(partition, connection, bucket)?;
     let sql = prepare_insert_statement(&partition_name, columns.len());
     let variadic_values = prepare_variadic_values(&columns);
     Ok((sql, variadic_values))

@@ -6,8 +6,3 @@ pub mod select;
 pub mod update;
 
 pub use create::*;
-// pub use delete::*;
-// pub use drop::*;
-// pub use insert::*;
-// pub use select::*;
-pub use update::*;

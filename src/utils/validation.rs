@@ -62,8 +62,8 @@ pub fn validate_and_map_columns<'vtab>(
 /// # Returns
 /// - `sqlite3_ext::Result<String>`: On successful resolution or creation, returns the name of the
 ///   partition as a `String`. On failure, returns an error related to the partition lookup or creation process.
-pub fn resolve_partition_name<'vtab>(
-    partition: &'vtab Partition<i64>,
+pub fn resolve_partition_name(
+    partition: &Partition<i64>,
     connection: &Connection,
     bucket: i64,
 ) -> sqlite3_ext::Result<String> {

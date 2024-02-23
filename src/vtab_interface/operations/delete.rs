@@ -1,6 +1,6 @@
-use sqlite3_ext::{vtab::ChangeInfo, FromValue, Value, ValueRef};
+use sqlite3_ext::ValueRef;
 
-use crate::{Lookup, Partition, PartitionAccessor};
+use crate::Partition;
 pub fn prepare_delete_statement(partition_name: &str, num_columns: usize) -> String {
     let placeholders = std::iter::repeat("?")
         .take(num_columns)
@@ -11,53 +11,38 @@ pub fn prepare_delete_statement(partition_name: &str, num_columns: usize) -> Str
         partition_name, placeholders
     )
 }
-pub fn delete<'vtab>(partition_name: &String) -> String {
-    // let (_partition_value, partition_name) = partition
-    //     .get_lookup()
-    //     .access_current_entry(|(partition_value, partition_name)| {
-    //         (*partition_value, partition_name.clone())
-    //     })
-    //     .unwrap();
-    // let placeholders = std::iter::repeat("?")
-    //     .take(values_count) // Take as many "?" as there are elements in the vec.
-    //     .collect::<Vec<&str>>()
-    //     .join(", ");
+pub fn delete(partition_name: &String) -> String {
     let sql = format!("DELETE FROM {} WHERE ROWID IN (?)", partition_name);
-
     sql
 }
 pub fn update<'vtab>(
-    partition: &'vtab Partition<i64>,
-    info: &mut ChangeInfo,
-) -> sqlite3_ext::Result<(String, Vec<Value>)> {
-    println!("{:#?}", info);
-    let (_partition_value, partition_name) = partition
-        .get_lookup()
-        .access_current_entry(|(partition_value, partition_name)| {
-            (*partition_value, partition_name.clone())
-        })
-        .unwrap();
-    let mut values: Vec<Value> = info.args()[1..]
-        .to_owned()
-        .iter()
-        .map(|&arg| arg.to_owned().unwrap())
-        .collect();
+    partition_name: &str,
+    partition: &Partition<i64>,
+    args: &'vtab mut [&'vtab mut ValueRef],
+) -> (String, Vec<&'vtab mut &'vtab mut ValueRef>) {
     let columns = &partition.columns;
-    let update_clause = values
-        .iter()
+    let mut return_values = Vec::new();
+
+    let (mut _new_rowid, cols) = args.split_first_mut().unwrap();
+    let update_clause = cols
+        .iter_mut()
         .enumerate()
-        .map(|(index, _value)| {
-            let column_name = columns.get(index).unwrap().get_name();
-            format!("{} = ?", column_name)
+        .filter_map(|(index, value)| {
+            if value.nochange() {
+                None
+            } else {
+                return_values.push(value);
+
+                let column_name = columns.get(index).unwrap().get_name();
+                Some(format!("{} = ?", column_name))
+            }
         })
         .collect::<Vec<String>>()
         .join(", ");
 
     let sql = format!(
-        "UPDATE {} SET {} WHERE {} = ?",
-        partition_name, update_clause, "rowid"
+        "UPDATE {} SET {} WHERE ROWID = ?",
+        partition_name, update_clause
     );
-
-    values.push(info.args()[0].to_owned()?);
-    Ok((sql, values))
+    (sql, return_values)
 }

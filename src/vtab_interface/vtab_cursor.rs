@@ -4,7 +4,6 @@ use std::usize;
 use super::{PartitionMetaTable, WhereClauses};
 use crate::utils::{aggregate_conditions_to_ranges, Condition};
 use crate::{Lookup, PartitionAccessor, Root};
-use rusqlite::ffi::SQLITE_ERROR;
 use sqlite3_ext::query::Column;
 use sqlite3_ext::vtab::ColumnContext;
 use sqlite3_ext::{vtab::VTabCursor, Value, ValueRef};
@@ -35,7 +34,7 @@ impl ResultBucket {
             partition_value,
             partition_name: partition_name.to_owned(),
             rows,
-            current_row_index: usize::default(),
+            current_row_index: 0,
         })
     }
     fn get_mut_current_row(&mut self) -> Option<&mut ResultRow> {
@@ -72,14 +71,14 @@ impl FromIterator<ResultColumn> for ResultRow {
 
 #[derive(Debug, Clone)]
 pub struct ResultColumn {
-    name: String,
+    _name: String,
     value: Value,
 }
 impl ResultColumn {
     fn new(column: &Column) -> ExtResult<Self> {
         let name = column.name()?.to_owned();
         let value = column.to_owned()?;
-        Ok(Self { name, value })
+        Ok(Self { _name: name, value })
     }
 }
 impl<'vtab> RangePartitionCursor<'vtab> {
@@ -167,6 +166,7 @@ impl<'vtab> RangePartitionCursor<'vtab> {
                 .get_root()
                 .get_interval(),
         );
+        // println!(" RANGES {:#?}", ranges);
         let (lower_bound, upper_bound) = ranges
             .get("partition_value")
             .unwrap_or(&(Bound::Unbounded, Bound::Unbounded));
@@ -179,17 +179,21 @@ impl<'vtab> RangePartitionCursor<'vtab> {
             .iter()
             .try_fold(Vec::new(), |mut acc, (partition_value, partition_name)| {
                 let sql = format!(
-                    "SELECT rowid, * FROM {} {}",
+                    "SELECT rowid as row_id, * FROM {} {}",
                     partition_name, partition_where_str
                 );
+                // println!("SELECTING BUCKETS: {:#?}", sql);
                 let mut stmt = self.meta_table.connection.prepare(&sql)?;
                 let result_rows = stmt.query(args.as_mut())?;
 
                 let mut row_columns = Vec::new();
                 while let Ok(Some(row)) = result_rows.next() {
+                    // println!("ROW FROM DB: {:#?}", row);
+
                     let columns = (0..row.len())
                         .filter_map(|index| {
                             let column = row.index(index);
+                            // println!("column for db_row: {:#?}, index: {:#?} ", column, index);
                             ResultColumn::new(column).ok()
                         })
                         .collect::<Vec<_>>();
@@ -207,6 +211,8 @@ impl<'vtab> RangePartitionCursor<'vtab> {
                 Ok(acc)
             });
         self.buckets = buckets?;
+        self.current_bucket_index = 0;
+        // println!("self.buckets: {:#?}", self.buckets);
         Ok(())
     }
 }
@@ -241,6 +247,7 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
             // Successfully moved to the next row within the same bucket, increment the counter.
             self.internal_rowid_counter += 1;
         }
+        // println!("end of next: {:#?}", self.internal_rowid_counter);
         Ok(())
     }
 
@@ -248,16 +255,10 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
         self.get_current_row().is_none()
     }
     fn column(&self, idx: usize, c: &ColumnContext) -> ExtResult<()> {
-        let column_value = self
-            .get_current_row()
-            .map(|row| &row.columns)
-            .and_then(|columns| columns.get(idx))
-            .map(|column| &column.value);
-        if let Some(value) = column_value {
-            println!("value : {:#?}", value);
-            c.set_result(value.to_owned())?;
-        }
-        //
+        if let Some(current_row) = self.get_current_row() {
+            c.set_result(current_row.columns[idx].value.to_owned())?
+        };
+
         Ok(())
     }
 
@@ -277,7 +278,11 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
             let mut rowid_mapper = self.meta_table.rowid_mapper.write().map_err(|e| {
                 sqlite3_ext::Error::Sqlite(1, Some(format!("Lock acquisition failed: {}", e)))
             })?;
-            rowid_mapper.push((column.clone(), partition_name.to_string()));
+
+            rowid_mapper.insert(
+                self.internal_rowid_counter,
+                (column.clone(), partition_name.to_string()),
+            );
         }
 
         Ok(self.internal_rowid_counter)

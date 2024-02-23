@@ -23,7 +23,7 @@ pub fn prepare_variadic_values(columns: &[(String, Value)]) -> Vec<Value> {
     c
 }
 
-pub fn create_partition<'a>(
+pub fn create_partition(
     db: &Connection,
     args: &[&str],
     insert: bool,

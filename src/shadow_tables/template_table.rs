@@ -215,8 +215,8 @@ mod tests {
         let copy_result = template
             .copy_template("10000", Connection::from_rusqlite(&rusq_conn))
             .unwrap();
-        //
-        // assert!(result);
+
+        assert!(result);
         // assert!(copy_result);
     }
 }

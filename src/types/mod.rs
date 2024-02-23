@@ -1,5 +1,4 @@
 use std::fmt::{self, Display};
-use std::ptr::NonNull;
 
 use crate::shadow_tables::*;
 pub use crate::utils::parse_value_type;
@@ -79,10 +78,10 @@ pub trait PartitionAccessor<T> {
         root: RootTable,
         lookup: LookupTable<T>,
         template: TemplateTable,
-    ) -> Partition<T>;
+    ) -> Self;
 }
 
-impl<'a, T> PartitionAccessor<T> for Partition<T> {
+impl<T> PartitionAccessor<T> for Partition<T> {
     fn get_root(&self) -> &RootTable {
         &self.root
     }
@@ -250,7 +249,7 @@ impl<'de> Deserialize<'de> for ValueDef {
             }
         }
 
-        const VARIANTS: &'static [&'static str] = &["Integer", "Float", "Text", "Blob", "Null"];
+        const VARIANTS: &[&str] = &["Integer", "Float", "Text", "Blob", "Null"];
         deserializer.deserialize_enum("ValueDef", VARIANTS, ValueDefVisitor)
     }
 }
