@@ -2,10 +2,9 @@ use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use crate::operations::delete::update;
 use crate::vtab_interface::vtab_cursor::*;
 use crate::{
-    operations::{delete::delete, insert::insert},
+    operations::{delete::delete, insert::insert, update::update},
     vtab_interface::WhereClause,
 };
 use crate::{Lookup, Partition, PartitionAccessor, Root, Template};

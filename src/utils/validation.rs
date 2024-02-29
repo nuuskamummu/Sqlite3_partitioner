@@ -22,9 +22,9 @@ use super::{parse_to_unix_epoch, parsing::value_type_to_string};
 /// - `sqlite3_ext::Result<Vec<(String, Value)>>`: On success, returns a vector of tuples, each containing
 ///   a column name and its corresponding value that passed the type validation. On failure, returns an
 ///   error indicating a type mismatch between the provided value and the column definition.
-pub fn validate_and_map_columns<'vtab>(
+pub fn validate_and_map_columns(
     info: &[&ValueRef],
-    column_declarations: &'vtab Vec<ColumnDeclaration>,
+    column_declarations: &[ColumnDeclaration],
 ) -> sqlite3_ext::Result<Vec<(String, Value)>> {
     info.iter()
         .enumerate()
@@ -76,7 +76,6 @@ pub fn resolve_partition_name(
                     .get_template()
                     .copy_template(&bucket.to_string(), connection)
             } else {
-                println!("resolving name {}", name);
                 Ok(name)
             }
         })

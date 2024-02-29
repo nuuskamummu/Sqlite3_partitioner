@@ -182,14 +182,11 @@ impl<'vtab> RangePartitionCursor<'vtab> {
                     "SELECT rowid as row_id, * FROM {} {}",
                     partition_name, partition_where_str
                 );
-                // println!("SELECTING BUCKETS: {:#?}", sql);
                 let mut stmt = self.meta_table.connection.prepare(&sql)?;
                 let result_rows = stmt.query(args.as_mut())?;
 
                 let mut row_columns = Vec::new();
                 while let Ok(Some(row)) = result_rows.next() {
-                    // println!("ROW FROM DB: {:#?}", row);
-
                     let columns = (0..row.len())
                         .filter_map(|index| {
                             let column = row.index(index);
@@ -212,7 +209,6 @@ impl<'vtab> RangePartitionCursor<'vtab> {
             });
         self.buckets = buckets?;
         self.current_bucket_index = 0;
-        // println!("self.buckets: {:#?}", self.buckets);
         Ok(())
     }
 }
@@ -247,7 +243,6 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
             // Successfully moved to the next row within the same bucket, increment the counter.
             self.internal_rowid_counter += 1;
         }
-        // println!("end of next: {:#?}", self.internal_rowid_counter);
         Ok(())
     }
 

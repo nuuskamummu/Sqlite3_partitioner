@@ -103,7 +103,6 @@ impl Root for RootTable {
     fn create_table(&self, db: &Connection) -> Result<bool> {
         let sql = self.create_table_query();
         Connection::execute(db, &sql, ())?;
-        println!("{}", sql);
         self.insert(db)?;
         Ok(true)
     }

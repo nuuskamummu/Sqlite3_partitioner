@@ -220,6 +220,6 @@ mod tests {
             .unwrap();
 
         assert!(result);
-        // assert!(copy_result);
+        assert_eq!(copy_result, "test_10000");
     }
 }

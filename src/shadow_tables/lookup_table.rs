@@ -428,78 +428,78 @@ impl Lookup<i64> for LookupTable<i64> {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use rusqlite::Connection as RusqConn;
-//     use rusqlite::Result as SqlResult;
-//     use sqlite3_ext::Connection;
-//     use std::sync::{Arc, RwLock};
-//
-//     // Function to set up an in-memory database connection
-//     fn setup_db<'a>(rusq_conn: &'a RusqConn) -> &'a Connection {
-//         let conn = Connection::from_rusqlite(rusq_conn);
-//         conn
-//     }
-//     fn init_rusq_conn() -> RusqConn {
-//         RusqConn::open_in_memory().unwrap()
-//     }
-//
-//     // Function to create a LookupTable instance for testing
-//     fn setup_lookup_table() -> LookupTable {
-//         LookupTable {
-//             base_name: "test".to_string(),
-//             partitions: RwLock::new(std::collections::BTreeMap::new()),
-//         }
-//     }
-//     #[test]
-//     fn test_create_table_query() {
-//         let lookup_table = setup_lookup_table();
-//         let query = lookup_table.create_table_query();
-//         assert_eq!(
-//             query,
-//             "CREATE TABLE test_lookup (partition_table varchar, partition_value integer);"
-//         );
-//     }
-//     #[test]
-//     fn test_insert() -> SqlResult<()> {
-//         let rusq_conn = init_rusq_conn();
-//         let db = setup_db(&rusq_conn);
-//         let lookup_table = setup_lookup_table();
-//         lookup_table.create_table(db).unwrap();
-//         let partition_value = 1i64;
-//         let expected_table_name = format!("{}_{}", lookup_table.base_name, partition_value);
-//
-//         lookup_table.insert(&db, partition_value)?;
-//
-//         let partition = lookup_table.get_partition(db, partition_value).unwrap();
-//         assert_eq!(partition.1, false);
-//         assert_eq!(partition.0, expected_table_name);
-//
-//         Ok(())
-//     }
-//     #[test]
-//     fn test_sync() -> sqlite3_ext::Result<()> {
-//         let rusq_conn = init_rusq_conn();
-//         let db = setup_db(&rusq_conn);
-//         let lookup_table = setup_lookup_table();
-//         lookup_table.create_table(db).unwrap();
-//         // Pre-insert a partition to simulate existing database state
-//         let partition_value = 1i64;
-//         lookup_table.insert(&db, partition_value)?;
-//
-//         // Clear the in-memory map to simulate out-of-sync state
-//         {
-//             let mut partitions = lookup_table.partitions.write().unwrap();
-//             partitions.clear();
-//         }
-//
-//         // Run sync to update in-memory map
-//         lookup_table.sync(&db)?;
-//
-//         let partition = lookup_table.get_partition(db, partition_value)?;
-//         assert_eq!(partition.0, "test_1".to_string());
-//
-//         Ok(())
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection as RusqConn;
+    use rusqlite::Result as SqlResult;
+    use sqlite3_ext::Connection;
+    use std::sync::RwLock;
+
+    // Function to set up an in-memory database connection
+    fn setup_db(rusq_conn: &RusqConn) -> &Connection {
+        let conn = Connection::from_rusqlite(rusq_conn);
+        conn
+    }
+    fn init_rusq_conn() -> RusqConn {
+        RusqConn::open_in_memory().unwrap()
+    }
+
+    // Function to create a LookupTable instance for testing
+    fn setup_lookup_table() -> LookupTable<i64> {
+        LookupTable {
+            base_name: "test".to_string(),
+            partitions: RwLock::new(std::collections::BTreeMap::new()),
+        }
+    }
+    #[test]
+    fn test_create_table_query() {
+        let lookup_table = setup_lookup_table();
+        let query = lookup_table.create_table_query();
+        assert_eq!(
+            query,
+            "CREATE TABLE test_lookup (partition_table varchar UNIQUE, partition_value integer UNIQUE);"
+        );
+    }
+    #[test]
+    fn test_insert() -> SqlResult<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        let lookup_table = setup_lookup_table();
+        lookup_table.create_table(db).unwrap();
+        let partition_value = 1i64;
+        let expected_table_name = format!("{}_{}", lookup_table.base_name, partition_value);
+
+        lookup_table.insert(db, partition_value)?;
+
+        let partition = lookup_table.get_partition(db, partition_value).unwrap();
+        assert_eq!(partition.1, false);
+        assert_eq!(partition.0, expected_table_name);
+
+        Ok(())
+    }
+    #[test]
+    fn test_sync() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        let lookup_table = setup_lookup_table();
+        lookup_table.create_table(db).unwrap();
+        // Pre-insert a partition to simulate existing database state
+        let partition_value = 1i64;
+        lookup_table.insert(db, partition_value)?;
+
+        // Clear the in-memory map to simulate out-of-sync state
+        {
+            let mut partitions = lookup_table.partitions.write().unwrap();
+            partitions.clear();
+        }
+
+        // Run sync to update in-memory map
+        lookup_table.sync(db)?;
+
+        let partition = lookup_table.get_partition(db, partition_value)?;
+        assert_eq!(partition.0, "test_1".to_string());
+
+        Ok(())
+    }
+}
