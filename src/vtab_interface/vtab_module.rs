@@ -8,7 +8,7 @@ use crate::{
     operations::{delete::delete, insert::insert},
     vtab_interface::WhereClause,
 };
-use crate::{Partition, PartitionAccessor, Template};
+use crate::{Lookup, Partition, PartitionAccessor, Root, Template};
 use sqlite3_ext::query::ToParam;
 use sqlite3_ext::{sqlite3_ext_vtab, vtab::VTab};
 use sqlite3_ext::{
@@ -47,7 +47,30 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
         ))
     }
     fn destroy(&mut self) -> ExtResult<()> {
-        // let drop_partitions = format!()
+        for partition in self
+            .partition_interface
+            .get_lookup()
+            .get_partitions_by_range(
+                self.connection,
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Unbounded,
+            )?
+        {
+            self.connection
+                .execute(&format!("DROP TABLE {}", partition.1), ())?;
+        }
+
+        self.connection
+            .execute(&self.partition_interface.get_root().drop_table_query(), ())?;
+        self.connection.execute(
+            &self.partition_interface.get_lookup().drop_table_query(),
+            (),
+        )?;
+        self.connection.execute(
+            &self.partition_interface.get_template().drop_table_query(),
+            (),
+        )?;
+
         Ok(())
     }
 }

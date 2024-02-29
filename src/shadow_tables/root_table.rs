@@ -67,6 +67,7 @@ pub trait Root {
     /// # Returns
     /// - `i64`: The interval value.
     fn get_interval(&self) -> i64;
+    fn drop_table_query(&self) -> String;
 }
 
 /// Represents a root table with a name, partition column, and interval for partitioning.
@@ -93,6 +94,9 @@ impl Root for RootTable {
             "CREATE TABLE {}(partition_column varchar, interval int);",
             self.name
         )
+    }
+    fn drop_table_query(&self) -> String {
+        format!("DROP TABLE {}", self.name)
     }
 
     /// Creates the root table in the database.

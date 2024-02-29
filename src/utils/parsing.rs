@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     cmp::{max, min},
     collections::HashMap,
     i64,
@@ -25,7 +26,7 @@ pub fn value_type_to_string(value_type: &ValueType) -> &'static str {
 }
 /// Converts a [str] to a [`sqlite3_ext::ValueType`]
 pub fn parse_value_type(sqlite_type: &str) -> Result<ValueType, String> {
-    match sqlite_type {
+    match &sqlite_type.to_uppercase()[..] {
         "INT" | "INTEGER" | "TIMESTAMP" => Ok(ValueType::Integer),
         "TEXT" | "VARCHAR" => Ok(ValueType::Text),
         "FLOAT" => Ok(ValueType::Float),
@@ -171,10 +172,32 @@ pub fn parse_create_table_args(args: &[&str]) -> Result<CreateTableArgs, String>
         .map(|&column_arg| ColumnDeclaration::new(column_arg))
         .collect();
     match columns {
-        Ok(cols) => Ok(CreateTableArgs {
-            table_name: table_name.to_string(),
-            columns: cols,
-        }),
+        Ok(cols) => {
+            let mut partition_columns = Vec::default();
+
+            {
+                for col in &cols {
+                    if col.is_partition_column() {
+                        partition_columns.push(col)
+                    }
+                }
+            }
+            if partition_columns.len() > 1 {
+                Err(format!(
+                    "Only one partition column is allowed. Counted: {:#?}",
+                    partition_columns.len()
+                ))
+            } else if partition_columns.is_empty() {
+                Err("No partition column detected".to_string())
+            } else {
+                let partition_column = partition_columns[0].clone();
+                Ok(CreateTableArgs {
+                    table_name: table_name.to_string(),
+                    columns: cols,
+                    partition_column,
+                })
+            }
+        }
         Err(e) => Err(e),
     }
 }

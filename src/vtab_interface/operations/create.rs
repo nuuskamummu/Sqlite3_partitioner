@@ -1,3 +1,4 @@
+use crate::parse_value_type;
 use crate::utils::parse_create_table_args;
 use crate::utils::parse_interval;
 use crate::Lookup;
@@ -40,8 +41,18 @@ pub fn create_partition(
         Ok(interval) => Ok(interval),
         Err(err) => Err(sqlite3_ext::Error::Sqlite(1, Some(err.to_string()))),
     }?;
-    let partition_column = &columns[0];
-
+    let partition_column = &create_table_args.partition_column;
+    if insert {
+        match parse_value_type(partition_column.get_type()) {
+            Ok(data_type) => match  data_type {
+                sqlite3_ext::ValueType::Integer => Ok(()),
+                _ => Err(sqlite3_ext::Error::Sqlite(1, Some("Need to be able to parse data type of partition column as Integer (will be stored as UNIX epoch). Allowed types are INTEGER, INT, TIMESTAMP".to_string())))
+            
+            }, 
+            Err(err) => Err(sqlite3_ext::Error::Sqlite(1, Some(err)))
+        }?;
+    }
+    
     let root_table: RootTable = Root::create(
         &create_table_args.table_name,
         partition_column.get_name().to_string(),
@@ -66,3 +77,5 @@ pub fn create_partition(
         template_table,
     ))
 }
+
+

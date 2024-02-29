@@ -11,26 +11,32 @@ pub struct ColumnDeclaration {
     name: String,
     data_type: ValueType,
     data_type_str: String,
+    is_partition_column: bool,
 }
 
 impl ColumnDeclaration {
     // Constructor returning a Result
     pub fn new(source: &str) -> Result<Self, String> {
         let tokens: Vec<&str> = source.split_whitespace().collect();
-
+        let mut is_partition_column = false;
         println!("{}", source);
         if tokens.len() != 2 {
-            return Err(format!(
-                "Invalid source string: {}. Expected format 'name type'",
-                source
-            )
-            .to_string());
+            if tokens.len() == 3 && tokens[2] == "partition_column" {
+                is_partition_column = true;
+            } else {
+                return Err(format!(
+                    "Invalid source string: {}. Expected format 'name type'",
+                    source
+                )
+                .to_string());
+            }
         }
 
         Ok(Self {
             name: tokens[0].trim().to_string(),
             data_type: parse_value_type(&tokens[1].trim().to_uppercase())?,
             data_type_str: tokens[1].trim().to_string(),
+            is_partition_column,
         })
     }
 
@@ -45,10 +51,14 @@ impl ColumnDeclaration {
     pub fn get_value_type(&self) -> &ValueType {
         &self.data_type
     }
+    pub fn is_partition_column(&self) -> bool {
+        self.is_partition_column
+    }
 }
 pub struct CreateTableArgs {
     pub table_name: String,
     pub columns: Vec<ColumnDeclaration>,
+    pub partition_column: ColumnDeclaration,
 }
 pub struct PartitionArgs {
     pub name: String,

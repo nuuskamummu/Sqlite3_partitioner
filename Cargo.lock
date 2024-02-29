@@ -409,22 +409,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusqlite-partitioner"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "env_logger",
- "log",
- "regex",
- "ron",
- "rusqlite",
- "serde",
- "serde_derive",
- "simple-logging",
- "sqlite3_ext",
-]
-
-[[package]]
 name = "rustix"
 version = "0.38.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -485,6 +469,22 @@ name = "smallvec"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6ecd384b10a64542d77071bd64bd7b231f4ed5940fba55e98c3de13824cf3d7"
+
+[[package]]
+name = "sqlite3-partitioner"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "env_logger",
+ "log",
+ "regex",
+ "ron",
+ "rusqlite",
+ "serde",
+ "serde_derive",
+ "simple-logging",
+ "sqlite3_ext",
+]
 
 [[package]]
 name = "sqlite3_ext"

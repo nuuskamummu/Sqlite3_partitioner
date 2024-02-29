@@ -121,6 +121,7 @@ pub trait Lookup<T> {
         from: Bound<T>,
         to: Bound<T>,
     ) -> Result<Vec<(T, String)>>;
+    fn drop_table_query(&self) -> String;
 }
 #[derive(Debug, Clone)]
 /// Represents a partition table with a specific name and value.
@@ -185,6 +186,9 @@ impl Lookup<i64> for LookupTable<i64> {
             "CREATE TABLE {} (partition_table varchar UNIQUE, partition_value integer UNIQUE);",
             self.get_lookup_table_name()
         )
+    }
+    fn drop_table_query(&self) -> String {
+        format!("DROP TABLE {}", self.get_lookup_table_name())
     }
 
     /// Generates the SQL query for inserting a new partition into the lookup table.

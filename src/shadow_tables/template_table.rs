@@ -72,6 +72,7 @@ pub trait Template {
         suffix: &'a str,
         db: &'a Connection,
     ) -> impl Fn() -> Result<String> + 'a;
+    fn drop_table_query(&self) -> String;
 }
 
 /// Represents a template table with a name and a list of column declarations.
@@ -133,7 +134,9 @@ impl Template for TemplateTable {
             self.get_column_declarations()
         )
     }
-
+    fn drop_table_query(&self) -> String {
+        format!("DROP TABLE {}", self.name)
+    }
     /// Generates a SQL query for creating a copy of the template table with a specific suffix.
     fn copy_template_query<'a>(&self, suffix: &str) -> String {
         format!(
