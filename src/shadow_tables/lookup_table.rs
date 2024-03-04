@@ -390,7 +390,6 @@ impl Lookup<i64> for LookupTable<i64> {
             .collect()
             .to_owned()?;
 
-
         Lookup::create(name, results)
     }
 

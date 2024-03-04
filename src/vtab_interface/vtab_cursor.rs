@@ -35,7 +35,7 @@ pub struct PartitionResult {
     current_row_index: usize,
 }
 impl PartitionResult {
-      /// Creates a new `PartitionResult` instance.
+    /// Creates a new `PartitionResult` instance.
     ///
     /// Returns `None` if the rows vector is empty, indicating that no data was retrieved
     /// for the partition.
@@ -148,7 +148,7 @@ impl<'vtab> RangePartitionCursor<'vtab> {
             partitions: Vec::new(),
             meta_table,
             internal_rowid_counter: i64::default(),
-            current_partition_index: usize::default(), 
+            current_partition_index: usize::default(),
         }
     }
 
@@ -241,19 +241,98 @@ impl<'vtab> RangePartitionCursor<'vtab> {
 
         (partition_where_str, lookup_conditions)
     }
-    /// Queries partitions based on specified WHERE clause conditions and updates the cursor state.
+    /// Retrieves a list of partition identifiers and names that fall within the specified bounds.
+    ///
+    /// This function queries the partition lookup to find partitions whose values are within
+    /// the specified lower and upper bounds. It's used to narrow down the partitions that
+    /// need to be queried based on the conditions provided.
     ///
     /// # Parameters
     ///
-    /// * `partition_where_str` - A `String` representing the WHERE clause for partition queries.
-    /// * `lookup_conditions` - Conditions for the lookup table.
-    /// * `args` - Query parameters.
+    /// * `lower_bound` - The lower bound of the partition value range to query.
+    /// * `upper_bound` - The upper bound of the partition value range to query.
     ///
     /// # Returns
     ///
-    /// A `Result` which is:
-    /// - `Ok(())` on successful query execution and state update.
-    /// - `Err(e)` on failure, where `e` is an error that occurred during query execution.
+    /// An `ExtResult<Vec<(i64, String)>>` which is:
+    /// - `Ok(vec)` on success, containing a vector of tuples where each tuple contains a partition's value and name.
+    /// - `Err(e)` on failure, indicating an error occurred while fetching the partition information
+    fn get_partitions_to_query(
+        &self,
+        lower_bound: Bound<i64>,
+        upper_bound: Bound<i64>,
+    ) -> ExtResult<Vec<(i64, String)>> {
+        self.meta_table
+            .partition_interface
+            .get_lookup()
+            .get_partitions_by_range(self.meta_table.connection, lower_bound, upper_bound)
+    }
+    /// Executes a SQL query against a specified partition and collects the results.
+    ///
+    /// This function prepares and executes a SQL query for the given partition, collecting
+    /// each row's data into `ResultRow` objects. It constructs `ResultRow` instances by
+    /// aggregating `ResultColumn` data for each row returned by the query.
+    ///
+    /// # Parameters
+    ///
+    /// * `partition_name` - The name of the partition to query.
+    /// * `partition_where_str` - The WHERE clause string to apply to the query, filtering the results.
+    /// * `args` - A mutable slice of `ValueRef`, representing bound parameters for the query.
+    ///
+    /// # Returns
+    ///
+    /// An `ExtResult<Vec<ResultRow>>` which is:
+    /// - `Ok(vec)` on success, containing a vector of `ResultRow` objects representing the query results.
+    /// - `Err(e)` on failure, indicating an error occurred during query execution or result processing.
+    fn execute_partition_query(
+        &self,
+        partition_name: &str,
+        partition_where_str: &str,
+        args: &mut [&mut ValueRef],
+    ) -> ExtResult<Vec<ResultRow>> {
+        let sql = format!(
+            "SELECT rowid as row_id, * FROM {} {}",
+            partition_name, partition_where_str
+        );
+        let mut stmt = self.meta_table.connection.prepare(&sql)?;
+        let result_rows = stmt.query(args.as_mut())?;
+
+        let mut rows = Vec::new();
+        while let Ok(Some(row)) = result_rows.next() {
+            let columns = (0..row.len())
+                .filter_map(|index| {
+                    let column = row.index(index);
+                    ResultColumn::new(column).ok()
+                })
+                .collect::<Vec<_>>();
+
+            if let Some(result_row) = columns.into_iter().collect::<Option<ResultRow>>() {
+                rows.push(result_row);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Queries partitions based on specified WHERE clause conditions and populates the cursor state.
+    ///
+    /// This method orchestrates the process of querying partitions within specified value ranges,
+    /// executing partition-specific queries, and collecting the results. It updates the cursor's
+    /// internal state to include the results from all queried partitions, readying it for row iteration.
+    ///
+    /// The function aggregates conditions into value ranges, identifies relevant partitions,
+    /// executes queries against those partitions, and finally aggregates the results into the
+    /// cursor's state.
+    ///
+    /// # Parameters
+    ///
+    /// * `partition_where_str` - A string representing the WHERE clause for partition queries.
+    /// * `lookup_conditions` - A vector of `Condition` objects representing the conditions to apply to the lookup.
+    /// * `args` - A mutable slice of `ValueRef`, representing bound parameters for the query.
+    ///
+    /// # Returns
+    ///
+    /// A `Result<(), Error>` indicating the success or failure of the operation. On success, the cursor's
+    /// internal state is updated with the query results. On failure, an error is returned detailing the issue.
     fn query_partitions(
         &mut self,
         partition_where_str: &str,
@@ -271,42 +350,14 @@ impl<'vtab> RangePartitionCursor<'vtab> {
         let (lower_bound, upper_bound) = ranges
             .get("partition_value")
             .unwrap_or(&(Bound::Unbounded, Bound::Unbounded));
+        let partitions_to_query = self.get_partitions_to_query(*lower_bound, *upper_bound)?;
+        for (partition_value, partition_name) in partitions_to_query {
+            let rows = self.execute_partition_query(&partition_name, partition_where_str, args)?;
+            if let Some(partition) = PartitionResult::new(partition_value, &partition_name, rows) {
+                self.partitions.push(partition);
+            }
+        }
 
-        let partitions: ExtResult<Vec<PartitionResult>> = self
-            .meta_table
-            .partition_interface
-            .get_lookup()
-            .get_partitions_by_range(self.meta_table.connection, *lower_bound, *upper_bound)?
-            .iter()
-            .try_fold(Vec::new(), |mut acc, (partition_value, partition_name)| {
-                let sql = format!(
-                    "SELECT rowid as row_id, * FROM {} {}",
-                    partition_name, partition_where_str
-                );
-                let mut stmt = self.meta_table.connection.prepare(&sql)?;
-                let result_rows = stmt.query(args.as_mut())?;
-
-                let mut row_columns = Vec::new();
-                while let Ok(Some(row)) = result_rows.next() {
-                    let columns = (0..row.len())
-                        .filter_map(|index| {
-                            let column = row.index(index);
-                            ResultColumn::new(column).ok()
-                        });
-                
-                    if let Some(result_row) = columns.collect::<Option<ResultRow>>() {
-                        row_columns.push(result_row);
-                    }
-                }
-
-                if let Some(partition) =
-                    PartitionResult::new(*partition_value, partition_name, row_columns)
-                {
-                    acc.push(partition);
-                }
-                Ok(acc)
-            });
-        self.partitions = partitions?;
         self.current_partition_index = 0;
         Ok(())
     }
@@ -422,5 +473,29 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
         }
 
         Ok(self.internal_rowid_counter)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_partition_result_new_with_empty_rows() {
+        let partition_result = PartitionResult::new(1, &"test_partition".to_string(), vec![]);
+        assert!(partition_result.is_none());
+    }
+
+    #[test]
+    fn test_partition_result_new_with_non_empty_rows() {
+        let rows = vec![ResultRow {
+            rowid: Value::Integer(1),
+            columns: vec![ResultColumn {
+                _name: "column1".to_string(),
+                value: Value::Integer(42),
+            }],
+        }];
+        let partition_result = PartitionResult::new(1, &"test_partition".to_string(), rows);
+        assert!(partition_result.is_some());
     }
 }
