@@ -19,7 +19,7 @@ impl ColumnDeclaration {
     pub fn new(source: &str) -> Result<Self, String> {
         let tokens: Vec<&str> = source.split_whitespace().collect();
         let mut is_partition_column = false;
-        println!("{}", source);
+
         if tokens.len() != 2 {
             if tokens.len() == 3 && tokens[2] == "partition_column" {
                 is_partition_column = true;

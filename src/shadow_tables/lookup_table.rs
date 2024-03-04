@@ -390,7 +390,7 @@ impl Lookup<i64> for LookupTable<i64> {
             .collect()
             .to_owned()?;
 
-        println!("{}", sql);
+
         Lookup::create(name, results)
     }
 
