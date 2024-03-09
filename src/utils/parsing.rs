@@ -8,9 +8,13 @@ use chrono::{NaiveDate, NaiveDateTime};
 use regex::Regex;
 use sqlite3_ext::{ffi::SQLITE_FORMAT, vtab::ConstraintOp, Value, ValueType};
 
-use crate::types::{ColumnDeclaration, CreateTableArgs};
+use crate::{
+    error::TableError,
+    types::{ColumnDeclaration, CreateTableArgs},
+    PartitionColumn,
+};
 
-pub fn calculate_bucket(value: &Value, interval: i64) -> sqlite3_ext::Result<i64> {
+pub fn parse_partition_value(value: &Value, interval: i64) -> sqlite3_ext::Result<i64> {
     parse_to_unix_epoch(value).map(|epoch| epoch - epoch % interval)
 }
 /// Converts a [`sqlite3_ext::ValueType`] to a [&`str`]
@@ -18,20 +22,22 @@ pub fn value_type_to_string(value_type: &ValueType) -> &'static str {
     match value_type {
         ValueType::Integer => "INTEGER",
         ValueType::Blob => "BLOB",
-        ValueType::Text => "STRING",
+        ValueType::Text => "TEXT",
         ValueType::Null => "NULL",
         ValueType::Float => "FLOAT",
     }
 }
 /// Converts a [str] to a [`sqlite3_ext::ValueType`]
-pub fn parse_value_type(sqlite_type: &str) -> Result<ValueType, String> {
+pub fn parse_value_type(sqlite_type: &str) -> Result<ValueType, TableError> {
     match &sqlite_type.to_uppercase()[..] {
         "INT" | "INTEGER" | "TIMESTAMP" => Ok(ValueType::Integer),
         "TEXT" | "VARCHAR" => Ok(ValueType::Text),
         "FLOAT" => Ok(ValueType::Float),
         "BLOB" | "JSON" => Ok(ValueType::Blob),
-        // Handle other SQLite types as needed
-        _ => Err(format!("Cannot parse input type :'{}'", sqlite_type)),
+        _ => Err(TableError::ParseValueType(format!(
+            "Cannot parse input type :'{}'",
+            sqlite_type
+        ))),
     }
 }
 
@@ -74,13 +80,13 @@ fn parse_datetime_to_epoch(datetime_str: &str) -> sqlite3_ext::Result<i64> {
         let trimmed_format = format.trim();
         // Attempt to parse as NaiveDateTime first
         if let Ok(datetime) = NaiveDateTime::parse_from_str(datetime_str, trimmed_format) {
-            return Ok(datetime.timestamp());
+            return Ok(datetime.and_utc().timestamp());
         }
         // Attempt to parse as NaiveDate if NaiveDateTime parsing fails
         if let Ok(date) = NaiveDate::parse_from_str(datetime_str, trimmed_format) {
             // Assuming start of the day for date-only entries
-            let datetime = date.and_hms_opt(0, 0, 0);
-            return Ok(datetime.unwrap().timestamp());
+            let datetime = date.and_hms_opt(0, 0, 0).unwrap();
+            return Ok(datetime.and_utc().timestamp());
         }
     }
 
@@ -110,27 +116,34 @@ pub fn parse_to_unix_epoch(value: &Value) -> sqlite3_ext::Result<i64> {
 /// Accepts a str with the format ["Numeric part Unit part"] where unit part is either [Hour] or
 /// [Minute]. The result is a i64 representation of the interval in seconds.
 // TODO better documentation, handle more cases.
-pub fn parse_interval(interval_str: &str) -> Result<i64, String> {
+pub fn parse_interval(interval_str: &str) -> Result<i64, TableError> {
     // Initialize the Regex pattern
-    let re =
-        Regex::new(r"(\d+)\s+(\w+)").map_err(|_| "Failed to compile regex pattern.".to_string())?;
+    let re = Regex::new(r"(\d+)\s+(\w+)")
+        .map_err(|_| TableError::ParseInterval("Failed to compile regex pattern.".to_string()))?;
 
     // Attempt to find matches in the input string
-    let captures = re
-        .captures(interval_str)
-        .ok_or("Interval format is not valid.")?;
+    let captures = re.captures(interval_str).ok_or(TableError::ParseInterval(
+        "Interval format is not valid.".to_string(),
+    ))?;
 
     // Extract the numeric part and unit part from the captures
     let numeric_part = captures
         .get(1)
-        .ok_or("Missing numeric value in interval.")?
+        .ok_or(TableError::ParseInterval(
+            "Missing numeric value in interval.".to_string(),
+        ))?
         .as_str();
-    let unit_part = captures.get(2).ok_or("Missing unit in interval.")?.as_str();
+    let unit_part = captures
+        .get(2)
+        .ok_or(TableError::ParseInterval(
+            "Missing unit in interval.".to_string(),
+        ))?
+        .as_str();
 
     // Parse the numeric part as a u32
-    let numeric_value = numeric_part
-        .parse::<i64>()
-        .map_err(|_| format!("Failed to parse '{}' as a number.", numeric_part))?;
+    let numeric_value = numeric_part.parse::<i64>().map_err(|_| {
+        TableError::ParseInterval(format!("Failed to parse '{}' as a number.", numeric_part))
+    })?;
 
     // Define a map for interval units to their sizes in seconds
     let mut interval_unit_to_size = HashMap::new();
@@ -138,9 +151,9 @@ pub fn parse_interval(interval_str: &str) -> Result<i64, String> {
     interval_unit_to_size.insert("day", 24 * 60 * 60);
 
     // Calculate and return the total interval size based on the unit
-    let size_in_seconds = interval_unit_to_size
-        .get(unit_part)
-        .ok_or_else(|| format!("Unsupported interval unit: '{}'.", unit_part))?;
+    let size_in_seconds = interval_unit_to_size.get(unit_part).ok_or_else(|| {
+        TableError::ParseInterval(format!("Unsupported interval unit: '{}'.", unit_part))
+    })?;
 
     Ok(numeric_value * size_in_seconds)
 }
@@ -161,43 +174,37 @@ pub fn parse_interval(interval_str: &str) -> Result<i64, String> {
 /// let args = vec!["module", "db_name", "table_name", "id INT", "name VARCHAR"];
 /// let create_table_args = parse_create_table_args(&args);
 /// ```
-pub fn parse_create_table_args(args: &[&str]) -> Result<CreateTableArgs, String> {
+pub fn parse_create_table_args(args: &[&str]) -> Result<CreateTableArgs, TableError> {
     let _module = args[0];
     let _database_name = args[1];
     let table_name = args[2];
     let column_args = args[3..].to_vec();
-    let columns: Result<Vec<ColumnDeclaration>, String> = column_args
+    let columns: Result<Vec<ColumnDeclaration>, TableError> = column_args
         .iter()
-        .map(|&column_arg| ColumnDeclaration::new(column_arg))
+        .map(|&column_arg| ColumnDeclaration::try_from(column_arg))
         .collect();
-    match columns {
-        Ok(cols) => {
-            let mut partition_columns = Vec::default();
+    let columns = columns?;
+    let partition_columns: Vec<ColumnDeclaration> = columns
+        .iter()
+        .filter_map(|col| PartitionColumn::from(col).column_def().clone())
+        .collect();
 
-            {
-                for col in &cols {
-                    if col.is_partition_column() {
-                        partition_columns.push(col)
-                    }
-                }
-            }
-            if partition_columns.len() > 1 {
-                Err(format!(
-                    "Only one partition column is allowed. Counted: {:#?}",
-                    partition_columns.len()
-                ))
-            } else if partition_columns.is_empty() {
-                Err("No partition column detected".to_string())
-            } else {
-                let partition_column = partition_columns[0].clone();
-                Ok(CreateTableArgs {
-                    table_name: table_name.to_string(),
-                    columns: cols,
-                    partition_column,
-                })
-            }
-        }
-        Err(e) => Err(e),
+    if partition_columns.len() > 1 {
+        Err(TableError::PartitionColumn(format!(
+            "Only one partition column is allowed. Counted: {:#?}",
+            partition_columns.len()
+        )))
+    } else if partition_columns.is_empty() {
+        Err(TableError::PartitionColumn(
+            "No partition column detected".to_string(),
+        ))
+    } else {
+        let partition_column = partition_columns[0].clone();
+        Ok(CreateTableArgs {
+            table_name: table_name.to_string(),
+            columns,
+            partition_column,
+        })
     }
 }
 /// Extracts pairs of column names and their associated operators from a given input string.
@@ -263,8 +270,8 @@ pub fn aggregate_conditions_to_ranges(
     let mut ranges: HashMap<String, (Bound<i64>, Bound<i64>)> = HashMap::new();
 
     for condition in conditions {
-        let partition_start = calculate_bucket(&condition.value, interval).unwrap(); //TODO handle
-                                                                                     //error
+        let partition_start = parse_partition_value(&condition.value, interval).unwrap(); //TODO handle
+                                                                                          //error
 
         ranges
             .entry(condition.column.clone())

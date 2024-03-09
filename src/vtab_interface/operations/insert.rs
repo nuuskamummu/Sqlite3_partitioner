@@ -1,4 +1,6 @@
-use crate::{vtab_interface::*, Partition, Root};
+use crate::{
+    shadow_tables::operations::Table, utils::validate_and_map_columns, vtab_interface::*, Partition,
+};
 use sqlite3_ext::{Connection, Value};
 
 pub fn insert<'vtab>(
@@ -6,7 +8,8 @@ pub fn insert<'vtab>(
     connection: &'vtab Connection,
     info: &mut ChangeInfo,
 ) -> sqlite3_ext::Result<(String, Vec<Value>)> {
-    let columns = validate_and_map_columns(&info.args()[1..], &partition.get_template().columns)?;
+    let columns =
+        validate_and_map_columns(&info.args()[1..], partition.get_template().columns().into())?;
     let partition_column = columns
         .iter()
         .find(|&(col_name, _)| col_name == &partition.get_root().partition_column)
@@ -17,7 +20,7 @@ pub fn insert<'vtab>(
             )
         })?;
 
-    let bucket = calculate_bucket(&partition_column.1, partition.get_root().get_interval())?;
+    let bucket = parse_partition_value(&partition_column.1, partition.get_root().get_interval())?;
     let partition_name: String = resolve_partition_name(partition, connection, bucket)?;
     let sql = prepare_insert_statement(&partition_name, columns.len());
     let variadic_values = prepare_variadic_values(&columns);

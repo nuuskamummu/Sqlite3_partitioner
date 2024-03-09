@@ -6,8 +6,11 @@ pub enum TableError {
         expected: &'static str,
         found: &'static str,
     },
+    ColumnDeclaration(String),
+    ParseValueType(String),
     SqlError(sqlite3_ext::Error),
-    // Other error types as needed
+    ParseInterval(String),
+    PartitionColumn(String),
 }
 
 impl From<sqlite3_ext::Error> for TableError {
@@ -23,6 +26,10 @@ impl Into<sqlite3_ext::Error> for TableError {
                 Some(format!("Expected: {}, Found: {}", expected, found)),
             ),
             Self::SqlError(err) => err,
+            Self::ColumnDeclaration(err) => sqlite3_ext::Error::Module(err),
+            Self::ParseValueType(err) => sqlite3_ext::Error::Module(err),
+            Self::ParseInterval(err) => sqlite3_ext::Error::Module(err),
+            Self::PartitionColumn(err) => sqlite3_ext::Error::Module(err),
         }
     }
 }

@@ -1,171 +1,36 @@
 use sqlite3_ext::{Connection, Result};
 
-use crate::types::ColumnDeclaration;
+use crate::ColumnDeclarations;
 
-/// A constant representing the postfix appended to the names of template tables.
-static TEMPLATE_TABLE_POSTFIX: &str = "template";
-
-/// Defines behavior for managing template tables, including creation, copying, and schema definition.
-///
-/// This trait encapsulates methods required to create template tables, generate creation queries,
-/// copy existing templates, and retrieve table schema information.
-pub trait Template {
-    /// Generates a SQL query string to create a new table based on the template.
-    ///
-    /// # Returns
-    /// - `String`: A SQL query string for creating a new table.
-    fn create_table_query(&self) -> String;
-
-    /// Creates a new instance of the implementing type representing a template table.
-    ///
-    /// # Parameters
-    /// - `name`: The base name of the template table.
-    /// - `columns`: A vector of `ColumnDeclaration` specifying the columns of the table.
-    ///
-    /// # Returns
-    /// - `Self`: An instance of the implementing type.
-    fn create(name: &str, columns: Vec<ColumnDeclaration>) -> Self
-    where
-        Self: Sized;
-
-    /// Generates a SQL query string to create a copy of the template table with a specified suffix.
-    ///
-    /// # Parameters
-    /// - `suffix`: The suffix to append to the table name for the copy.
-    ///
-    /// # Returns
-    /// - `String`: A SQL query string for creating a copy of the template table.
-    fn copy_template_query(&self, suffix: &str) -> String;
-
-    /// Creates the template table in the specified database connection.
-    ///
-    /// # Parameters
-    /// - `db`: A reference to the database connection.
-    ///
-    /// # Returns
-    /// - `Result<bool>`: Returns `Ok(true)` if the table creation was successful.
-    fn create_table(&self, db: &Connection) -> Result<bool>;
-
-    /// Copies the template table in the specified database connection, appending a suffix to the name.
-    ///
-    /// # Parameters
-    /// - `suffix`: The suffix to append to the table name for the copy.
-    /// - `db`: A reference to the database connection.
-    ///
-    /// # Returns
-    /// - `Result<String>`: Returns `Ok(String)` with the name of the copied table if successful.
-    fn copy_template(&self, suffix: &str, db: &Connection) -> Result<String>;
-
-    /// Retrieves the base name of the template table, without the postfix.
-    ///
-    /// # Returns
-    /// - `Option<&str>`: The base name of the template table if it can be derived from the current name.
-    fn get_base_name(&self) -> Option<&str>;
-
-    /// Generates a string representation of the column declarations for the template table.
-    ///
-    /// # Returns
-    /// - `String`: A comma-separated string of column declarations.
-    fn get_column_declarations(&self) -> String;
-    fn prepare_copy_template<'a>(
-        &'a self,
-        suffix: &'a str,
-        db: &'a Connection,
-    ) -> impl Fn() -> Result<String> + 'a;
-    fn drop_table_query(&self) -> String;
-}
-
+use super::operations::{Copy, Create, Drop, Schema, SchemaDeclaration, Table};
 /// Represents a template table with a name and a list of column declarations.
-
 #[derive(Debug)]
 pub struct TemplateTable {
-    name: String,
-
-    pub columns: Vec<ColumnDeclaration>,
+    schema: SchemaDeclaration,
 }
-
-impl Template for TemplateTable {
-    /// Creates a new `TemplateTable` instance with a specified name and columns.
-    ///
-    /// The table name is automatically appended with a predefined postfix to denote it as a template.
-    fn create(name: &str, columns: Vec<ColumnDeclaration>) -> Self {
-        TemplateTable {
-            name: format!("{}_{}", name, TEMPLATE_TABLE_POSTFIX),
-            columns: columns.clone(),
-        }
+impl<'vtab> Table for TemplateTable {
+    const POSTFIX: &'static str = "template";
+    fn schema(&self) -> &SchemaDeclaration {
+        &self.schema
     }
-
-    /// Generates a string of column declarations for the table, used in creating SQL queries.
-    ///
-    /// Each declaration is formatted as "name type" and separated by commas.
-    fn get_column_declarations(&self) -> String {
-        self.columns
-            .clone()
-            .into_iter()
-            /*  .map(|c| format!("{} {}", c.name, c.data_type)) */
-            .map(|c| format!("{} {}", c.get_name(), c.get_type()))
-            .collect::<Vec<String>>()
-            .join(",")
+}
+impl Create for TemplateTable {}
+impl Copy for TemplateTable {}
+impl Drop for TemplateTable {}
+impl Schema for TemplateTable {}
+impl TemplateTable {
+    pub fn create(
+        db: &Connection,
+        name: String,
+        column_declarations: ColumnDeclarations,
+    ) -> Result<Self> {
+        let table_name = Self::format_name(&name);
+        let schema = <Self as Schema>::create(db, table_name.to_string(), column_declarations)?;
+        Ok(Self { schema })
     }
-
-    /// Retrieves the base name of the table by removing the predefined postfix.
-    ///
-    /// This is useful for operations that need to reference the table without its template designation.
-    fn get_base_name(&self) -> Option<&str> {
-        match self.name.split_once("_") {
-            Some(value) => Some(value.0),
-            None => None,
-        }
-    }
-
-    /// Creates the table in the database using a SQL creation query generated by `create_table_query`.
-    fn create_table(&self, db: &Connection) -> Result<bool> {
-        let sql = self.create_table_query();
-        Connection::execute(db, &sql, ())?;
-        Ok(true)
-    }
-
-    /// Generates a SQL query for creating the table, including all column declarations.
-    fn create_table_query(&self) -> String {
-        format!(
-            "CREATE TABLE {} ({});",
-            self.name,
-            self.get_column_declarations()
-        )
-    }
-    fn drop_table_query(&self) -> String {
-        format!("DROP TABLE {}", self.name)
-    }
-    /// Generates a SQL query for creating a copy of the template table with a specific suffix.
-    fn copy_template_query<'a>(&self, suffix: &str) -> String {
-        format!(
-            "CREATE TABLE IF NOT EXISTS {}_{} AS SELECT * FROM {};",
-            self.get_base_name().unwrap(),
-            suffix,
-            self.name
-        )
-    }
-
-    /// Copies the template table in the database, appending a suffix to the new table's name.
-    fn copy_template<'a>(&self, suffix: &str, db: &Connection) -> Result<String> {
-        let sql = self.copy_template_query(suffix);
-
-        Connection::execute(db, &sql, ())?;
-        Ok(format!("{}_{}", self.get_base_name().unwrap(), suffix).to_string())
-    }
-    fn prepare_copy_template<'a>(
-        &'a self,
-        suffix: &'a str,
-        db: &'a Connection,
-    ) -> impl Fn() -> Result<String> + 'a {
-        let sql = self.copy_template_query(suffix);
-        move || {
-            let result = db.execute(&sql, ());
-            match result {
-                Ok(_) => Ok(format!("{}_{}", self.get_base_name().unwrap(), suffix).to_string()),
-                Err(err) => Err(err),
-            }
-        }
+    pub fn connect(db: &Connection, name: String) -> Result<Self> {
+        let schema = <Self as Schema>::connect(db, &name)?;
+        Ok(Self { schema })
     }
 }
 
@@ -175,50 +40,40 @@ mod tests {
     use super::*;
     use rusqlite::Connection as RusqConn;
     use sqlite3_ext::Connection;
-    fn mock_template(name: &str) -> TemplateTable {
-        let columns = vec![
-            ColumnDeclaration::new("first_column int").unwrap(),
-            ColumnDeclaration::new("second_column int").unwrap(),
-            ColumnDeclaration::new("third_column varchar").unwrap(),
-        ];
-        Template::create(name, columns)
+    fn mock_template() -> (String, ColumnDeclarations) {
+        let columns = ColumnDeclarations::from_iter([
+            "first_column int",
+            "second_column int",
+            "third_column varchar",
+        ]);
+        ("test".to_string(), columns)
     }
 
     #[test]
-    fn test_create() {
-        let template = mock_template("test");
-        assert_eq!(template.name, "test_template");
-    }
-    #[test]
     fn test_db_create() {
-        let name = "test";
-        let rusq_conn = match RusqConn::open_in_memory() {
+        let conn = match RusqConn::open_in_memory() {
             Ok(conn) => conn,
             Err(err) => panic!("{}", err.to_string()),
         };
-        let template = mock_template(name);
-        let result = match template.create_table(Connection::from_rusqlite(&rusq_conn)) {
-            Ok(r) => r,
-            Err(err) => panic!("{}", err.to_string()),
-        };
-        assert!(result);
+        let conn = Connection::from_rusqlite(&conn);
+
+        let (name, columns) = mock_template();
+        let table = TemplateTable::create(conn, name, columns);
+
+        assert!(table.is_ok());
     }
     #[test]
     fn test_db_copy() {
-        let name = "test";
-        let rusq_conn = match RusqConn::open_in_memory() {
+        let conn = match RusqConn::open_in_memory() {
             Ok(conn) => conn,
             Err(err) => panic!("{}", err.to_string()),
         };
-        let template = mock_template(name);
-        let result = template
-            .create_table(Connection::from_rusqlite(&rusq_conn))
-            .unwrap();
-        let copy_result = template
-            .copy_template("10000", Connection::from_rusqlite(&rusq_conn))
-            .unwrap();
+        let conn = Connection::from_rusqlite(&conn);
+        let (name, columns) = mock_template();
+        let table = TemplateTable::create(conn, name, columns).unwrap();
 
-        assert!(result);
+        let copy_result = table.copy("10000", conn).unwrap();
+
         assert_eq!(copy_result, "test_10000");
     }
 }

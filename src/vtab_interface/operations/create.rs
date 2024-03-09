@@ -1,16 +1,16 @@
-use crate::parse_value_type;
-use crate::utils::parse_create_table_args;
+use crate::error::TableError;
 use crate::utils::parse_interval;
-use crate::Lookup;
+use crate::ColumnDeclaration;
+use crate::ColumnDeclarations;
 use crate::LookupTable;
 use crate::Partition;
 use crate::PartitionAccessor;
-use crate::Root;
+use crate::PartitionColumn;
 use crate::RootTable;
-use crate::Template;
 use crate::TemplateTable;
 use sqlite3_ext::Connection;
 use sqlite3_ext::Value;
+use sqlite3_ext::ValueType;
 extern crate sqlite3_ext;
 pub fn prepare_insert_statement(partition_name: &str, num_columns: usize) -> String {
     let placeholders = std::iter::repeat("?")
@@ -24,58 +24,72 @@ pub fn prepare_variadic_values(columns: &[(String, Value)]) -> Vec<Value> {
     c
 }
 
-pub fn create_partition(
+pub fn create_partition<'a>(
     db: &Connection,
     args: &[&str],
     insert: bool,
-) -> sqlite3_ext::Result<Partition<i64>> {
+) -> Result<Partition<i64>, TableError> {
+    let _module = args[0];
+    let _database_name = args[1];
+    let table_name = args[2];
     let interval_col = args[3];
-    let arguments = args.to_owned();
-    let s_args = [&arguments[0..3], &arguments[4..]].concat();
-    let create_table_args = match parse_create_table_args(&s_args) {
-        Ok(table_args) => Ok(table_args),
-        Err(err) => Err(sqlite3_ext::Error::Sqlite(1, Some(err.to_string()))),
-    }?;
-    let columns = &create_table_args.columns;
-    let interval = match parse_interval(interval_col) {
-        Ok(interval) => Ok(interval),
-        Err(err) => Err(sqlite3_ext::Error::Sqlite(1, Some(err.to_string()))),
-    }?;
-    let partition_column = &create_table_args.partition_column;
-    if insert {
-        match parse_value_type(partition_column.get_type()) {
-            Ok(data_type) => match  data_type {
-                sqlite3_ext::ValueType::Integer => Ok(()),
-                _ => Err(sqlite3_ext::Error::Sqlite(1, Some("Need to be able to parse data type of partition column as Integer (will be stored as UNIX epoch). Allowed types are INTEGER, INT, TIMESTAMP".to_string())))
-            
-            }, 
-            Err(err) => Err(sqlite3_ext::Error::Sqlite(1, Some(err)))
-        }?;
-    }
-    
-    let root_table: RootTable = Root::create(
-        &create_table_args.table_name,
-        partition_column.get_name().to_string(),
-        interval,
-    );
+    let column_args = &args[4..];
+    // let arguments = args.to_owned();
+    // let s_args = [&arguments[0..3], &arguments[4..]].concat();
+    // let create_table_args = parse_create_table_args(&s_args)?;
+    let columns: Result<Vec<ColumnDeclaration>, TableError> = column_args
+        .iter()
+        .map(|&column_arg| ColumnDeclaration::try_from(column_arg))
+        .collect();
+    let columns = match columns {
+        Ok(columns) => columns,
+        Err(err) => return Err(err),
+    };
+    // let columns = &create_table_args.columns;
+    let interval = parse_interval(interval_col)?;
+    let partition_column: ColumnDeclaration =
+        match PartitionColumn::from_iter(columns.clone()).column_def() {
+            Some(col) => Ok(col),
+            None => Err(sqlite3_ext::Error::Module(
+                "Could not find column with identifier partition_column.".into(),
+            )),
+        }?
+        .clone();
 
-    let template_table: TemplateTable =
-        Template::create(&create_table_args.table_name, columns.clone());
-    let lookup_table: LookupTable<_> = Lookup::create(&create_table_args.table_name, Vec::new())?;
+    match partition_column.data_type() {
+        ValueType::Integer => Ok(()),
+        _ => Err(sqlite3_ext::Error::Module(
+            "Incorrect data type for partition column. Expected Interval.".to_string(),
+        )),
+    }?;
+
+    let root_table: RootTable;
+    let template_table: TemplateTable;
+    let lookup_table: LookupTable<_>;
     if insert {
-        root_table.create_table(db)?;
-        lookup_table.create_table(db)?;
-        template_table.create_table(db)?;
+        root_table = RootTable::create(
+            db,
+            table_name,
+            partition_column.get_name().to_string(),
+            interval,
+        )?;
+
+        lookup_table = LookupTable::create(db, table_name)?;
+        template_table = TemplateTable::create(
+            db,
+            table_name.to_string(),
+            ColumnDeclarations(columns.clone()),
+        )?;
     } else {
-        lookup_table.sync(db)?;
+        root_table = RootTable::connect(db, table_name)?;
+        template_table = TemplateTable::connect(db, table_name.to_string())?;
+        lookup_table = LookupTable::connect(db, table_name)?;
     }
     Ok(Partition::new(
-        &create_table_args.table_name,
+        table_name,
         columns.clone(),
         root_table,
         lookup_table,
         template_table,
     ))
 }
-
-

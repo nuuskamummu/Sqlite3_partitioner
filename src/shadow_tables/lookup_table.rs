@@ -1,13 +1,15 @@
 use sqlite3_ext::query::{Statement, ToParam};
-use sqlite3_ext::{Connection, FallibleIterator};
-use sqlite3_ext::{FallibleIteratorMut, FromValue, Result};
+use sqlite3_ext::{Connection, ValueType};
+use sqlite3_ext::{FallibleIteratorMut, FromValue, Result as ExtResult};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::RwLock;
 
-/// A constant representing the postfix appended to the names of lookup tables.
+use super::operations::{Create, Drop, Schema, SchemaDeclaration, Table};
+use super::{PartitionType, PartitionValue};
+use crate::error::TableError;
 
-static LOOKUP_TABLE_POSTFIX: &str = "lookup";
+/// A constant representing the postfix appended to the names of lookup tables.
 
 /// Defines behavior for managing lookup tables, including creation, connection, data insertion,
 /// and retrieval based on partitioning logic.
@@ -15,67 +17,6 @@ static LOOKUP_TABLE_POSTFIX: &str = "lookup";
 /// This trait encapsulates methods required for creating lookup tables, generating SQL queries for
 /// creation and insertion, connecting to existing tables, managing and accessing partition information.
 pub trait Lookup<T> {
-    /// Generates a SQL query string to create a new lookup table.
-    ///
-    /// # Returns
-    /// - `String`: A SQL query string for creating a new lookup table.
-    fn create_table_query(&self) -> String;
-
-    /// Generates a SQL query string for inserting data into the lookup table.
-    ///
-    /// # Returns
-    /// - `String`: A SQL query string for inserting partition information into the lookup table.
-    fn insert_query(&self) -> String;
-
-    /// Creates the lookup table in the specified database connection.
-    ///
-    /// # Parameters
-    /// - `db`: A reference to the database connection.
-    ///
-    /// # Returns
-    /// - `Result<bool>`: Returns `Ok(true)` if the table creation was successful.
-    fn create_table(&self, db: &Connection) -> Result<bool>;
-
-    /// Retrieves the full name of the lookup table, including the base name and postfix.
-    ///
-    /// # Returns
-    /// - `String`: The full name of the lookup table.
-    fn get_lookup_table_name(&self) -> String;
-
-    /// Connects to an existing lookup table in the database and returns an instance of the implementing type.
-    ///
-    /// # Parameters
-    /// - `db`: A reference to the database connection.
-    /// - `name`: The base name of the lookup table to connect to.
-    ///
-    /// # Returns
-    /// - `Result<Self>`: An instance of the implementing type representing the connected lookup table.
-    fn connect(db: &Connection, name: &str) -> Result<Self>
-    where
-        Self: Sized;
-
-    /// Inserts a new partition into the lookup table and updates the internal partition management structure.
-    ///
-    /// # Parameters
-    /// - `db`: A reference to the database connection.
-    /// - `partition_value`: The partition value to insert.
-    ///
-    /// # Returns
-    /// - `Result<String>`: The name of the created or updated partition table.
-    fn insert(&self, db: &Connection, partition_value: T) -> Result<String>;
-
-    /// Creates a new instance of the implementing type representing a lookup table with specified partitions.
-    ///
-    /// # Parameters
-    /// - `name`: The base name of the lookup table.
-    /// - `partitions`: A vector of `PartitionTable` representing initial partitions.
-    ///
-    /// # Returns
-    /// - `Result<Self>`: An instance of the implementing type.
-    fn create(name: &str, partitions: Vec<PartitionTable>) -> Result<Self>
-    where
-        Self: Sized;
-
     /// Retrieves information about a specific partition based on a bucket value, including whether
     /// a new partition needs to be created.
     ///
@@ -85,7 +26,7 @@ pub trait Lookup<T> {
     ///
     /// # Returns
     /// - `Result<(String, bool)>`: The name of the partition table and a boolean indicating if it needs to be created.
-    fn get_partition(&self, db: &Connection, bucket: T) -> Result<(String, bool)>;
+    fn get_partition(&self, db: &Connection, bucket: T) -> ExtResult<(String, bool)>;
 
     /// Synchronizes the internal partitions map with the current state of the database.
     ///
@@ -94,7 +35,7 @@ pub trait Lookup<T> {
     ///
     /// # Returns
     /// - `Result<()>`: Indicates successful synchronization or provides an error.
-    fn sync(&self, db: &Connection) -> Result<()>;
+    fn sync(&self, db: &Connection) -> ExtResult<()>;
 
     /// Performs a custom synchronization of the partitions map based on a specified condition.
     ///
@@ -104,7 +45,7 @@ pub trait Lookup<T> {
     ///
     /// # Returns
     /// - `Result<()>`: Indicates successful synchronization or provides an error.
-    fn custom_sync(&self, db: &Connection, where_clause: String) -> Result<()>;
+    fn custom_sync(&self, db: &Connection, where_clause: String) -> ExtResult<()>;
 
     /// Retrieves a list of partitions within a specified range of partition values.
     ///
@@ -120,23 +61,42 @@ pub trait Lookup<T> {
         db: &Connection,
         from: Bound<T>,
         to: Bound<T>,
-    ) -> Result<Vec<(T, String)>>;
+    ) -> ExtResult<Vec<(T, String)>>;
     fn drop_table_query(&self) -> String;
 }
-#[derive(Debug, Clone)]
-/// Represents a partition table with a specific name and value.
-pub struct PartitionTable {
-    name: String,
-    value: i64,
-}
-/// Represents a lookup table with a base name and a map of partitions.
 
+impl PartitionType for LookupTable<i64> {
+    const PARTITION_NAME_COLUMN: &'static str = "partition_table";
+    const PARTITION_VALUE_COLUMN: &'static str = "partition_value";
+    const PARTITION_VALUE_COLUMN_TYPE: &'static PartitionValue = &PartitionValue::Interval;
+    const PARTITION_NAME_COLUMN_TYPE: &'static ValueType = &ValueType::Text;
+}
+// type LookUpSchema = Schema;
+impl Schema for LookupTable<i64> {}
+impl Table for LookupTable<i64> {
+    const POSTFIX: &'static str = "loopup";
+    fn schema(&self) -> &SchemaDeclaration {
+        &self.schema
+    }
+}
+impl Create for LookupTable<i64> {
+    fn create_table_query(&self) -> String {
+        format!(
+            "CREATE TABLE {} ({} UNIQUE, {} UNIQUE);",
+            self.schema().name(),
+            Self::partition_name_column(),
+            Self::partition_value_column()
+        )
+    }
+}
+impl Drop for LookupTable<i64> {}
 #[derive(Debug)]
 pub struct LookupTable<T> {
-    base_name: String,
+    schema: SchemaDeclaration,
+    // base_name: String,
     pub partitions: RwLock<BTreeMap<T, String>>,
 }
-impl Lookup<i64> for LookupTable<i64> {
+impl LookupTable<i64> {
     /// Creates a new `LookupTable` instance with a specified base name and initial partitions.
     ///
     /// This method initializes the lookup table's partitions map with the given partitions and sets the base name.
@@ -147,17 +107,19 @@ impl Lookup<i64> for LookupTable<i64> {
     ///
     /// # Returns
     /// - `Result<Self>`: An instance of `LookupTable`.
-    fn create(name: &str, partitions: Vec<PartitionTable>) -> Result<Self> {
-        let partition_tree: RwLock<BTreeMap<i64, String>> = RwLock::new(
-            partitions
-                .into_iter()
-                .map(|partition| (partition.value, partition.name))
-                .collect(),
-        );
-
+    pub fn create(db: &Connection, base_name: &str) -> Result<Self, TableError> {
+        // let partition_tree: RwLock<BTreeMap<i64, String>> = RwLock::new(
+        //     partitions
+        //         .into_iter()
+        //         .map(|partition| (partition.value, partition.name))
+        //         .collect(),
+        // );
+        let table_name = Self::format_name(base_name);
+        let columns = <Self as PartitionType>::columns();
+        let schema = <Self as Schema>::create(db, table_name.to_string(), columns)?;
         Ok(LookupTable {
-            partitions: partition_tree,
-            base_name: name.to_string(),
+            partitions: RwLock::default(),
+            schema,
         })
     }
 
@@ -168,12 +130,6 @@ impl Lookup<i64> for LookupTable<i64> {
     ///
     /// # Returns
     /// - `Result<bool>`: `Ok(true)` if the table is successfully created.
-    fn create_table(&self, db: &Connection) -> Result<bool> {
-        let sql = self.create_table_query();
-
-        Connection::execute(db, &sql, ())?;
-        Ok(true)
-    }
 
     /// Generates the SQL query to create the lookup table in the database.
     ///
@@ -181,24 +137,17 @@ impl Lookup<i64> for LookupTable<i64> {
     ///
     /// # Returns
     /// - `String`: The SQL query string.
-    fn create_table_query(&self) -> String {
-        format!(
-            "CREATE TABLE {} (partition_table varchar UNIQUE, partition_value integer UNIQUE);",
-            self.get_lookup_table_name()
-        )
-    }
-    fn drop_table_query(&self) -> String {
-        format!("DROP TABLE {}", self.get_lookup_table_name())
-    }
 
     /// Generates the SQL query for inserting a new partition into the lookup table.
     ///
     /// # Returns
     /// - `String`: The SQL insert query string.
-    fn insert_query(&self) -> String {
+    fn insert_query<'a>(&'a self) -> String {
+        let partition_table_name = Self::partition_name_column().get_name().to_owned();
+        let partition_value_name = Self::partition_value_column().get_name().to_owned();
         format!(
-            "INSERT INTO {} (partition_table, partition_value) VALUES (?, ?)",
-            self.get_lookup_table_name()
+            "INSERT INTO {} ({partition_table_name}, {partition_value_name}) VALUES (?, ?)",
+            self.name()
         )
     }
     /// Retrieves a partition from the lookup table based on the provided bucket value.
@@ -213,17 +162,21 @@ impl Lookup<i64> for LookupTable<i64> {
     /// # Returns
     /// - `Result<(String, bool)>`: The name of the partition table and a boolean indicating
     ///   whether the table needs to be created.
-    fn get_partition(&self, db: &Connection, bucket: i64) -> Result<(String, bool)> {
+    pub fn get_partition(
+        &self,
+        db: &Connection,
+        partition_value: i64,
+    ) -> ExtResult<(String, bool)> {
         self.sync(db)?;
         let borrowed_partitions = self.partitions.read().map_err(|err| {
             sqlite3_ext::Error::Sqlite(1, Some(format!("Error reading partitions: {}", err)))
         })?;
 
-        if let Some(v) = borrowed_partitions.get(&bucket) {
+        if let Some(v) = borrowed_partitions.get(&partition_value) {
             return Ok((v.to_owned(), false));
         }
         drop(borrowed_partitions);
-        Ok((self.insert(db, bucket)?, true))
+        Ok((self.insert(db, partition_value)?, true))
     }
 
     /// Synchronizes the in-memory partitions map with the current state of the lookup table in the database.
@@ -235,7 +188,7 @@ impl Lookup<i64> for LookupTable<i64> {
     ///
     /// # Returns
     /// - `Result<()>`: Indicates success or failure of the synchronization process.
-    fn sync(&self, db: &Connection) -> Result<()> {
+    pub fn sync(&self, db: &Connection) -> ExtResult<()> {
         // Acquire a write lock on partitions upfront, simplifying error handling.
         let mut borrowed_partitions = self.partitions.write().map_err(|err| {
             sqlite3_ext::Error::Sqlite(
@@ -253,8 +206,11 @@ impl Lookup<i64> for LookupTable<i64> {
 
         // Prepare SQL query using placeholders for the collected partition values.
         let sql = format!(
-            "SELECT partition_value, partition_table FROM {} WHERE partition_value NOT IN ({});",
-            self.get_lookup_table_name(),
+            "SELECT {}, {} FROM {} WHERE {} NOT IN ({});",
+            Self::partition_value_column().get_name(),
+            Self::partition_name_column().get_name(),
+            self.name(),
+            Self::partition_value_column().get_name(),
             placeholders
         ); // Prepare and execute the query, handling errors uniformly.
         let mut statement = db.prepare(&sql).map_err(|err| {
@@ -286,7 +242,7 @@ impl Lookup<i64> for LookupTable<i64> {
     ///
     /// # Returns
     /// - `Result<()>`: Indicates success or failure of the custom synchronization process.
-    fn custom_sync(&self, db: &Connection, where_clause: String) -> Result<()> {
+    fn custom_sync(&self, db: &Connection, where_clause: String) -> ExtResult<()> {
         let mut borrowed_partitions = self.partitions.write().map_err(|err| {
             sqlite3_ext::Error::Sqlite(
                 1,
@@ -299,17 +255,20 @@ impl Lookup<i64> for LookupTable<i64> {
         borrowed_partitions.clear();
         let local_partition_values = borrowed_partitions.keys().cloned().collect::<Vec<i64>>();
 
-        let variadric_params = std::iter::repeat("?")
+        let placeholders = std::iter::repeat("?")
             .take(local_partition_values.len()) // Directly use the length of the keys vector
             .collect::<Vec<&str>>()
             .join(",");
 
         let sql = format!(
-            "SELECT * FROM {} WHERE partition_value NOT IN ({}) AND  {};",
-            self.get_lookup_table_name(),
-            variadric_params,
+            "SELECT {}, {} FROM {} WHERE {} NOT IN ({}) AND {};",
+            Self::partition_value_column().get_name(),
+            Self::partition_name_column().get_name(),
+            self.name(),
+            Self::partition_value_column().get_name(),
+            placeholders,
             where_clause
-        );
+        ); //
 
         let mut statement = db.prepare(&sql)?;
 
@@ -336,12 +295,12 @@ impl Lookup<i64> for LookupTable<i64> {
     ///
     /// # Returns
     /// - `Result<Vec<(i64, String)>>`: A vector of tuples containing partition values and their corresponding table names.
-    fn get_partitions_by_range(
+    pub fn get_partitions_by_range(
         &self,
         db: &Connection,
         from: Bound<i64>,
         to: Bound<i64>,
-    ) -> Result<Vec<(i64, String)>> {
+    ) -> ExtResult<Vec<(i64, String)>> {
         self.sync(db)?;
         let borrowed_partitions = self.partitions.read().map_err(|err| {
             sqlite3_ext::Error::Sqlite(
@@ -363,9 +322,9 @@ impl Lookup<i64> for LookupTable<i64> {
     ///
     /// # Returns
     /// - `String`: The full name of the lookup table.
-    fn get_lookup_table_name(&self) -> String {
-        format!("{}_{}", self.base_name, LOOKUP_TABLE_POSTFIX)
-    }
+    // fn get_lookup_table_name(&self) -> String {
+    //     format!("{}_{}", , Self::POSTFIX)
+    // }
 
     /// Connects to an existing lookup table in the database, initializing the `LookupTable` instance
     /// based on the retrieved partitions.
@@ -376,21 +335,15 @@ impl Lookup<i64> for LookupTable<i64> {
     ///
     /// # Returns
     /// - `Result<Self>`: An instance of `LookupTable`.
-    fn connect(db: &Connection, name: &str) -> Result<Self> {
-        let sql = format!("SELECT * FROM {}_{};", name, LOOKUP_TABLE_POSTFIX);
-        let results = db
-            .prepare(&sql)?
-            .query(())?
-            .map(|row| {
-                Ok(PartitionTable {
-                    name: row[0].get_str()?.to_owned(),
-                    value: row[1].get_i64(),
-                })
-            })
-            .collect()
-            .to_owned()?;
-
-        Lookup::create(name, results)
+    pub fn connect(db: &Connection, base_name: &str) -> ExtResult<Self> {
+        let table_name = &Self::format_name(base_name);
+        let schema = <Self as Schema>::connect(db, &table_name.to_string())?;
+        let table = Self {
+            partitions: RwLock::default(),
+            schema,
+        };
+        table.sync(db)?;
+        Ok(table)
     }
 
     /// Inserts a new partition into the lookup table and updates the internal partitions map.
@@ -401,9 +354,8 @@ impl Lookup<i64> for LookupTable<i64> {
     ///
     /// # Returns
     /// - `Result<String>`: The name of the newly inserted partition table.
-    fn insert(&self, db: &Connection, partition_value: i64) -> Result<String> {
-        let partition_table_name = format!("{}_{}", self.base_name, partition_value);
-
+    fn insert(&self, db: &Connection, partition_value: i64) -> ExtResult<String> {
+        let partition_table_name = format!("{}_{}", self.get_base_name().unwrap(), partition_value);
         Connection::prepare(db, &self.insert_query())?.execute(|stmt: &mut Statement| {
             partition_table_name.bind_param(stmt, 1)?;
             partition_value.bind_param(stmt, 2)?;
@@ -430,10 +382,10 @@ impl Lookup<i64> for LookupTable<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use rusqlite::Connection as RusqConn;
     use rusqlite::Result as SqlResult;
     use sqlite3_ext::Connection;
-    use std::sync::RwLock;
 
     // Function to set up an in-memory database connection
     fn setup_db(rusq_conn: &RusqConn) -> &Connection {
@@ -445,34 +397,37 @@ mod tests {
     }
 
     // Function to create a LookupTable instance for testing
-    fn setup_lookup_table() -> LookupTable<i64> {
-        LookupTable {
-            base_name: "test".to_string(),
-            partitions: RwLock::new(std::collections::BTreeMap::new()),
-        }
-    }
-    #[test]
-    fn test_create_table_query() {
-        let lookup_table = setup_lookup_table();
-        let query = lookup_table.create_table_query();
-        assert_eq!(
-            query,
-            "CREATE TABLE test_lookup (partition_table varchar UNIQUE, partition_value integer UNIQUE);"
-        );
-    }
+    // fn setup_lookup_table() -> LookupTable<i64> {
+    //     LookupTable {
+    //         base_name: "test".to_string(),
+    //         partitions: RwLock::new(std::collections::BTreeMap::new()),
+    //     }
+    // }
+    // #[test]
+    // fn test_create_table_query() {
+    //     let lookup_table = setup_lookup_table();
+    //     let query = lookup_table.create_table_query().unwrap();
+    //     assert_eq!(
+    //         query,
+    //         "CREATE TABLE test_lookup (partition_table varchar UNIQUE, partition_value integer UNIQUE);"
+    //     );
+    // }
     #[test]
     fn test_insert() -> SqlResult<()> {
         let rusq_conn = init_rusq_conn();
         let db = setup_db(&rusq_conn);
-        let lookup_table = setup_lookup_table();
-        lookup_table.create_table(db).unwrap();
+        let lookup_table = LookupTable::create(db, "test").unwrap();
         let partition_value = 1i64;
-        let expected_table_name = format!("{}_{}", lookup_table.base_name, partition_value);
+        let expected_table_name = format!(
+            "{}_{}",
+            lookup_table.get_base_name().unwrap(),
+            partition_value
+        );
 
         lookup_table.insert(db, partition_value)?;
 
         let partition = lookup_table.get_partition(db, partition_value).unwrap();
-        assert_eq!(partition.1, false);
+        assert!(!partition.1);
         assert_eq!(partition.0, expected_table_name);
 
         Ok(())
@@ -481,11 +436,12 @@ mod tests {
     fn test_sync() -> sqlite3_ext::Result<()> {
         let rusq_conn = init_rusq_conn();
         let db = setup_db(&rusq_conn);
-        let lookup_table = setup_lookup_table();
-        lookup_table.create_table(db).unwrap();
+        let lookup_table = LookupTable::create(db, "test").unwrap();
         // Pre-insert a partition to simulate existing database state
-        let partition_value = 1i64;
-        lookup_table.insert(db, partition_value)?;
+        let partition_values = [1710003600, 1710000000, 1710007200];
+        for partition_value in partition_values {
+            lookup_table.insert(db, partition_value)?;
+        }
 
         // Clear the in-memory map to simulate out-of-sync state
         {
@@ -496,8 +452,8 @@ mod tests {
         // Run sync to update in-memory map
         lookup_table.sync(db)?;
 
-        let partition = lookup_table.get_partition(db, partition_value)?;
-        assert_eq!(partition.0, "test_1".to_string());
+        let partition = lookup_table.get_partition(db, 1710003600)?;
+        assert_eq!(partition.0, "test_1710003600".to_string());
 
         Ok(())
     }

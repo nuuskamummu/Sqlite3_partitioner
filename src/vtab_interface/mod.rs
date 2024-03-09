@@ -11,7 +11,6 @@ use sqlite3_ext::{
     vtab::{ChangeInfo, ConstraintOp, IndexInfoConstraint},
     Connection, Result as ExtResult,
 };
-pub use vtab_cursor::ResultRow;
 
 use std::{
     collections::HashMap,
@@ -21,7 +20,7 @@ use std::{
 };
 
 use crate::{
-    utils::{calculate_bucket, resolve_partition_name, validate_and_map_columns},
+    utils::{parse_partition_value, resolve_partition_name},
     ConstraintOpDef, PartitionAccessor,
 };
 

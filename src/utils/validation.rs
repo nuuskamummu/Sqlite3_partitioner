@@ -1,7 +1,8 @@
 use sqlite3_ext::{Connection, FromValue, Value, ValueRef};
 
 use crate::{
-    error::TableError, types::PartitionAccessor, ColumnDeclaration, Lookup, Partition, Template,
+    error::TableError, shadow_tables::operations::Copy, types::PartitionAccessor,
+    ColumnDeclaration, Partition,
 };
 
 use super::{parse_to_unix_epoch, parsing::value_type_to_string};
@@ -24,21 +25,23 @@ use super::{parse_to_unix_epoch, parsing::value_type_to_string};
 ///   error indicating a type mismatch between the provided value and the column definition.
 pub fn validate_and_map_columns(
     info: &[&ValueRef],
+
     column_declarations: &[ColumnDeclaration],
 ) -> sqlite3_ext::Result<Vec<(String, Value)>> {
     info.iter()
         .enumerate()
         .map(|(i, &v)| {
-            let reference_column = &column_declarations[i];
+            let reference_column = &column_declarations[i]; //info is always in the same order as
+                                                            //the table was declared in.
 
-            if &v.value_type() == reference_column.get_value_type()
+            if &v.value_type() == reference_column.data_type()
                 || (reference_column.get_type().to_uppercase() == "TIMESTAMP"
                     && parse_to_unix_epoch(&v.to_owned().unwrap()).is_ok())
             {
                 Ok((reference_column.get_name().to_string(), v.to_owned()?))
             } else {
                 Err(TableError::ColumnTypeMismatch {
-                    expected: value_type_to_string(reference_column.get_value_type()),
+                    expected: value_type_to_string(reference_column.data_type()),
                     found: value_type_to_string(&v.value_type()),
                 }
                 .into())
@@ -74,7 +77,7 @@ pub fn resolve_partition_name(
             if should_create {
                 partition
                     .get_template()
-                    .copy_template(&bucket.to_string(), connection)
+                    .copy(&bucket.to_string(), connection)
             } else {
                 Ok(name)
             }

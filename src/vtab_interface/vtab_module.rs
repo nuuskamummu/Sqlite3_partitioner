@@ -2,12 +2,13 @@ use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use crate::shadow_tables::operations::{Create, Drop};
 use crate::vtab_interface::vtab_cursor::*;
 use crate::{
     operations::{delete::delete, insert::insert, update::update},
     vtab_interface::WhereClause,
 };
-use crate::{Lookup, Partition, PartitionAccessor, Root, Template};
+use crate::{Partition, PartitionAccessor};
 use sqlite3_ext::query::ToParam;
 use sqlite3_ext::{sqlite3_ext_vtab, vtab::VTab};
 use sqlite3_ext::{
@@ -47,7 +48,10 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
         Self: Sized,
     {
         // Creation logic for the partition, including SQL table creation
-        let p = create_partition(db, args, true)?;
+        let p = match create_partition(db, args, false) {
+            Ok(partition) => partition,
+            Err(err) => return Err(err.into()),
+        };
         // The schema that serves as a interface to the user.
         let sql = p.get_template().create_table_query();
         Ok((
@@ -77,8 +81,10 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
                 .execute(&format!("DROP TABLE {}", partition.1), ())?;
         }
 
-        self.connection
-            .execute(&self.partition_interface.get_root().drop_table_query(), ())?;
+        &self
+            .partition_interface
+            .get_root()
+            .drop_table(self.connection);
         self.connection.execute(
             &self.partition_interface.get_lookup().drop_table_query(),
             (),
@@ -161,7 +167,10 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
         Self: Sized,
     {
         // Connection logic, similar to `create` but for establishing connections without creating tables.
-        let p = create_partition(db, args, false)?;
+        let p = match create_partition(db, args, false) {
+            Ok(partition) => partition,
+            Err(err) => return Err(err.into()),
+        };
         let connection = db;
 
         Ok((
