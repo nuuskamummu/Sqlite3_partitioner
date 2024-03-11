@@ -1,4 +1,3 @@
-mod bucket_table;
 pub mod interface;
 pub mod lookup_table;
 pub mod operations;

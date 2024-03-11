@@ -1,4 +1,5 @@
-use sqlite3_ext::{query::Column as sqlite3_column, ValueRef};
+use sqlite3_ext::query::Column as sqlite3_column;
+use sqlite3_ext::{FromValue, Value};
 /// Represents the result of a query against a single partition.
 ///
 /// Contains information about the partition, including its value, name, and the rows retrieved
@@ -10,14 +11,14 @@ use sqlite3_ext::{query::Column as sqlite3_column, ValueRef};
 /// * `partition_name` - The name of the partition.
 /// * `rows` - A vector of `ResultRow` instances representing the rows retrieved from the partition.
 #[derive(Debug)]
-pub struct Partition<'result> {
+pub struct Partition {
     pub partition_value: i64, //index in lookup_table.partitions.
-    pub partition_name: &'result str,
-    pub rows: Vec<Row<'result>>,
+    pub partition_name: String,
+    pub rows: Vec<Row>,
     current_row_index: usize,
 }
 
-impl<'result> Partition<'result> {
+impl Partition {
     /// Creates a new `PartitionResult` instance.
     ///
     /// Returns `None` if the rows vector is empty, indicating that no data was retrieved
@@ -32,7 +33,7 @@ impl<'result> Partition<'result> {
     /// # Returns
     ///
     /// An `Option<PartitionResult>`, which is `None` if `rows` is empty.
-    pub fn new(partition_value: i64, partition_name: &str, rows: Vec<Row>) -> Option<Self> {
+    pub fn new(partition_value: i64, partition_name: String, rows: Vec<Row>) -> Option<Self> {
         if rows.is_empty() {
             return None;
         }
@@ -66,13 +67,13 @@ impl<'result> Partition<'result> {
 /// * `rowid` - The unique identifier for the row within its partition.
 /// * `columns` - A vector of `ResultColumn` instances representing the data within the row.
 #[derive(Debug, Clone)]
-pub struct Row<'result> {
-    pub rowid: &'result ValueRef,
-    pub columns: Vec<Column<'result>>,
+pub struct Row {
+    pub rowid: Value,
+    pub columns: Vec<Column>,
 }
 
-impl<'result> FromIterator<Column<'result>> for Option<Row<'result>> {
-    fn from_iter<T: IntoIterator<Item = Column<'result>>>(iter: T) -> Self {
+impl FromIterator<Column> for Option<Row> {
+    fn from_iter<T: IntoIterator<Item = Column>>(iter: T) -> Self {
         let mut iter = iter.into_iter();
         let first_column = match iter.next() {
             Some(column) => column,
@@ -85,34 +86,34 @@ impl<'result> FromIterator<Column<'result>> for Option<Row<'result>> {
         })
     }
 }
-// /// Represents a single column within a `ResultRow`.
-// ///
-// /// Encapsulates the name and value of the column, providing structured access to row data.
-// ///
-// /// # Attributes
-// ///
-// /// * `_name` - The name of the column.
-// /// * `value` - The value stored in the column, encapsulated as a `Value`.
+/// Represents a single column within a `ResultRow`.
+///
+/// Encapsulates the name and value of the column, providing structured access to row data.
+///
+/// # Attributes
+///
+/// * `_name` - The name of the column.
+/// * `value` - The value stored in the column, encapsulated as a `Value`.
 #[derive(Debug, Clone)]
-pub struct Column<'result> {
-    pub _name: &'result str,
-    pub value: &'result ValueRef,
+pub struct Column {
+    pub _name: String,
+    pub value: Value,
 }
-// /// Constructs a new `ResultColumn` from a SQLite column.
-// ///
-// /// # Parameters
-// ///
-// /// * `column` - A reference to the SQLite column from which to construct the `ResultColumn`.
-// ///
-// /// # Returns
-// ///
-// /// A `Result` which is:
-// /// - `Ok(Self)` on success, containing the newly created `ResultColumn`.
-// /// - `Err(e)` on failure, where `e` is an error that occurred during column creation.
-impl<'result> Column<'result> {
+/// Constructs a new `ResultColumn` from a SQLite column.
+///
+/// # Parameters
+///
+/// * `column` - A reference to the SQLite column from which to construct the `ResultColumn`.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(Self)` on success, containing the newly created `ResultColumn`.
+/// - `Err(e)` on failure, where `e` is an error that occurred during column creation.
+impl Column {
     pub fn new(column: &sqlite3_column) -> sqlite3_ext::Result<Self> {
-        let name = column.name()?;
-        let value = column.as_ref();
+        let name = column.name()?.to_owned();
+        let value = column.to_owned()?;
         Ok(Self { _name: name, value })
     }
 }

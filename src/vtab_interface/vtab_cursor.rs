@@ -1,6 +1,6 @@
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
-use std::ops::{Bound, Deref, Index};
+use std::ops::{Bound, Index};
 use std::usize;
 
 use super::{PartitionMetaTable, WhereClause, WhereClauses};
@@ -16,7 +16,7 @@ use sqlite3_ext::{FallibleIteratorMut, Result as ExtResult};
 pub struct RangePartitionCursor<'vtab> {
     pub internal_rowid_counter: i64,
     pub meta_table: &'vtab PartitionMetaTable<'vtab>,
-    pub partitions: Vec<Partition<'vtab>>,
+    pub partitions: Vec<Partition>,
     pub current_partition_index: usize, // current_partition: Option<&'vtab PartitionResult<'vtab>>,
 }
 impl<'vtab> RangePartitionCursor<'vtab> {
@@ -207,8 +207,7 @@ impl<'vtab> RangePartitionCursor<'vtab> {
             .get_partitions_to_query(lower_bound, upper_bound)?
         {
             let rows = &self.execute_partition_query(&partition_name, partition_conditions)?;
-            if let Some(partition) = Partition::new(partition_value, &partition_name, rows.clone())
-            {
+            if let Some(partition) = Partition::new(partition_value, partition_name, rows.clone()) {
                 self.partitions.push(partition);
             }
         }
@@ -336,7 +335,7 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
 
             rowid_mapper.insert(
                 self.internal_rowid_counter,
-                (column, partition_name.to_string()),
+                (column.clone(), partition_name.to_string()),
             );
         }
 
