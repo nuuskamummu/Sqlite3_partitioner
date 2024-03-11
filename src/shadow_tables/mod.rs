@@ -1,19 +1,20 @@
 mod bucket_table;
+pub mod interface;
 pub mod lookup_table;
 pub mod operations;
 mod partition_interface;
 pub mod root_table;
 pub mod template_table;
-
 pub use lookup_table::*;
 pub use partition_interface::partition::{
     Column as PartitionColumn, Partition, Row as PartitionRow,
 };
+
 pub use root_table::*;
 use sqlite3_ext::ValueType;
 pub use template_table::*;
 
-use crate::{error::TableError, ColumnDeclaration, ColumnDeclarations};
+use crate::{ColumnDeclaration, ColumnDeclarations};
 
 pub enum PartitionValue {
     Interval,
@@ -56,15 +57,10 @@ pub trait PartitionType {
             Self::PARTITION_NAME_COLUMN.to_string(),
             *Self::PARTITION_NAME_COLUMN_TYPE,
         )
-
-        // ColumnDeclaration::try_from(format!("{name} {value_type}").as_ref())
     }
 
     fn partition_value_column() -> ColumnDeclaration {
         let value_type: &ValueType = Self::PARTITION_VALUE_COLUMN_TYPE.into();
         ColumnDeclaration::new(Self::PARTITION_VALUE_COLUMN.to_string(), *value_type)
-        // let name: &str = Self::PARTITION_VALUE_COLUMN;
-        // let value_type: &str = Self::PARTITION_VALUE_COLUMN_TYPE.into();
-        // ColumnDeclaration::try_from(format!("{name} {value_type}").as_ref())
     }
 }

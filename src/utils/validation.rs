@@ -1,9 +1,6 @@
-use sqlite3_ext::{Connection, FromValue, Value, ValueRef};
+use sqlite3_ext::{FromValue, ValueRef};
 
-use crate::{
-    error::TableError, shadow_tables::operations::Copy, types::PartitionAccessor,
-    ColumnDeclaration, Partition,
-};
+use crate::{error::TableError, ColumnDeclaration, PartitionAccessor};
 
 use super::{parse_to_unix_epoch, parsing::value_type_to_string};
 
@@ -23,22 +20,26 @@ use super::{parse_to_unix_epoch, parsing::value_type_to_string};
 /// - `sqlite3_ext::Result<Vec<(String, Value)>>`: On success, returns a vector of tuples, each containing
 ///   a column name and its corresponding value that passed the type validation. On failure, returns an
 ///   error indicating a type mismatch between the provided value and the column definition.
-pub fn validate_and_map_columns(
-    info: &[&ValueRef],
-
-    column_declarations: &[ColumnDeclaration],
-) -> sqlite3_ext::Result<Vec<(String, Value)>> {
-    info.iter()
+pub fn validate_and_map_columns<'a>(
+    info: &'a [&'a ValueRef],
+    column_declarations: &'a [ColumnDeclaration],
+    partition_column_name: &'a str,
+) -> sqlite3_ext::Result<(&'a [&'a ValueRef], Option<&'a ValueRef>)> {
+    let mut partition_column: Option<&ValueRef> = None;
+    let a: sqlite3_ext::Result<Vec<(String, &ValueRef)>> = info
+        .iter()
         .enumerate()
         .map(|(i, &v)| {
-            let reference_column = &column_declarations[i]; //info is always in the same order as
-                                                            //the table was declared in.
+            let reference_column = &column_declarations[i]; //info is always in the same order as the table was declared in.
 
+            if reference_column.get_name() == partition_column_name {
+                partition_column = Some(v);
+            }
             if &v.value_type() == reference_column.data_type()
                 || (reference_column.get_type().to_uppercase() == "TIMESTAMP"
-                    && parse_to_unix_epoch(&v.to_owned().unwrap()).is_ok())
+                    && parse_to_unix_epoch(v).is_ok())
             {
-                Ok((reference_column.get_name().to_string(), v.to_owned()?))
+                Ok((":".to_string() + reference_column.get_name(), v))
             } else {
                 Err(TableError::ColumnTypeMismatch {
                     expected: value_type_to_string(reference_column.data_type()),
@@ -47,39 +48,6 @@ pub fn validate_and_map_columns(
                 .into())
             }
         })
-        .collect()
-}
-
-/// Resolves the name of a partition by first attempting to sync with the Lookup to see if the
-/// partition exists, potentially created by another connection. If the partition does not exist,
-/// it will be created by copying the template.
-///
-/// This function ensures that the partition name is correctly identified or created before
-/// proceeding with operations that depend on the partition's existence.
-///
-/// # Parameters
-/// - `partition`: A reference to the `RangePartition` struct representing the partition to resolve.
-/// - `connection`: A reference to the `Connection` object, used for database interaction.
-/// - `bucket`: An `i64` value representing the bucket number or identifier for the partition.
-///
-/// # Returns
-/// - `sqlite3_ext::Result<String>`: On successful resolution or creation, returns the name of the
-///   partition as a `String`. On failure, returns an error related to the partition lookup or creation process.
-pub fn resolve_partition_name(
-    partition: &Partition<i64>,
-    connection: &Connection,
-    bucket: i64,
-) -> sqlite3_ext::Result<String> {
-    partition
-        .get_lookup()
-        .get_partition(connection, bucket)
-        .and_then(|(name, should_create)| {
-            if should_create {
-                partition
-                    .get_template()
-                    .copy(&bucket.to_string(), connection)
-            } else {
-                Ok(name)
-            }
-        })
+        .collect();
+    Ok((info, partition_column))
 }

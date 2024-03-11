@@ -6,32 +6,31 @@ use sqlite3_ext::FromValue;
 use sqlite3_ext::Result as ExtResult;
 use sqlite3_ext::ValueType;
 
+use super::operations::Connect;
 use super::operations::Create;
 use super::operations::Drop;
-use super::operations::Schema;
 use super::operations::SchemaDeclaration;
 use super::PartitionValue;
-use crate::error::TableError;
 
 use super::operations::Table;
 use super::PartitionType;
 
 #[derive(Debug, Clone)]
 pub struct RootTable {
-    pub partition_column: String,
+    partition_column: String,
     interval: i64,
     schema: SchemaDeclaration,
 }
 
-impl<'vtab> Table for RootTable {
+impl Table for RootTable {
     fn schema(&self) -> &SchemaDeclaration {
         &self.schema
     }
     const POSTFIX: &'static str = "root";
 }
-impl Schema for RootTable {}
 impl Create for RootTable {}
 impl Drop for RootTable {}
+impl Connect for RootTable {}
 
 impl PartitionType for RootTable {
     const PARTITION_NAME_COLUMN: &'static str = "partition_column";
@@ -41,16 +40,19 @@ impl PartitionType for RootTable {
 }
 
 impl RootTable {
+    pub fn partition_column(&self) -> &str {
+        &self.partition_column
+    }
     /// Creates a new `RootTable` instance with specified name, partition column, and interval.
     pub fn create(
         db: &Connection,
         base_name: &str,
         partition_column: String,
         interval: i64,
-    ) -> Result<Self, TableError> {
+    ) -> ExtResult<Self> {
         let table_name = Self::format_name(base_name);
         let columns = <Self as PartitionType>::columns();
-        let schema = <Self as Schema>::create(db, table_name.to_string(), columns)?;
+        let schema = <Self as Create>::schema(db, table_name.to_string(), columns)?;
         let table = Self {
             partition_column,
             interval,
@@ -59,9 +61,9 @@ impl RootTable {
         table.insert(db)?;
         Ok(table)
     }
-    pub fn connect(db: &Connection, base_name: &str) -> Result<Self, TableError> {
+    pub fn connect(db: &Connection, base_name: &str) -> ExtResult<Self> {
         let table_name = &Self::format_name(base_name);
-        let schema = <Self as Schema>::connect(db, &table_name.to_string())?;
+        let schema = <Self as Connect>::schema(db, &table_name.to_string())?;
         let columns: String = schema.columns().to_string();
         let query = format!("SELECT {columns} FROM {table_name}");
         let mut partition_column: String = String::default();
@@ -94,7 +96,6 @@ impl RootTable {
             self.name()
         );
 
-        println!("{:#?}", "asd");
         db.insert(&sql, params![self.partition_column, self.get_interval()])?;
         Ok(true)
     }

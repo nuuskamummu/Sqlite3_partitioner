@@ -1,13 +1,13 @@
 use sqlite3_ext::ValueRef;
 
-use crate::Partition;
+use crate::shadow_tables::interface::VirtualTable;
 
 pub fn update<'vtab>(
     partition_name: &str,
-    partition: &Partition<i64>,
+    partition: &VirtualTable,
     args: &'vtab mut [&'vtab mut ValueRef],
 ) -> (String, Vec<&'vtab mut &'vtab mut ValueRef>) {
-    let columns = &partition.columns;
+    let columns = partition.columns();
     let mut return_values = Vec::new();
 
     let (mut _new_rowid, cols) = args.split_first_mut().unwrap();
@@ -20,7 +20,7 @@ pub fn update<'vtab>(
             } else {
                 return_values.push(value);
 
-                let column_name = columns.get(index).unwrap().get_name();
+                let column_name = columns.0.get(index).unwrap().get_name();
                 Some(format!("{} = ?", column_name))
             }
         })

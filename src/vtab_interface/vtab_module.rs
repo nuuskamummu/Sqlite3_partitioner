@@ -2,13 +2,12 @@ use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use crate::shadow_tables::operations::{Create, Drop};
+use crate::shadow_tables::interface::VirtualTable;
 use crate::vtab_interface::vtab_cursor::*;
 use crate::{
     operations::{delete::delete, insert::insert, update::update},
     vtab_interface::WhereClause,
 };
-use crate::{Partition, PartitionAccessor};
 use sqlite3_ext::query::ToParam;
 use sqlite3_ext::{sqlite3_ext_vtab, vtab::VTab};
 use sqlite3_ext::{
@@ -17,7 +16,7 @@ use sqlite3_ext::{
 };
 use sqlite3_ext::{FromValue, Value};
 
-use super::{construct_where_clause, create_partition};
+use super::{connect_to_virtual_table, construct_where_clause, create_virtual_table};
 /// Represents a metadata table for managing partitions in a SQLite database.
 ///
 /// This structure implements the `VTab` trait to provide custom virtual table functionality,
@@ -26,7 +25,7 @@ use super::{construct_where_clause, create_partition};
 #[sqlite3_ext_vtab(StandardModule, UpdateVTab)]
 pub struct PartitionMetaTable<'vtab> {
     /// An interface to the partition logic, encapsulating partition management.
-    pub partition_interface: Partition<i64>,
+    pub interface: VirtualTable<'vtab>,
     /// Reference to the SQLite connection, used for executing SQL statements.
     pub connection: &'vtab Connection,
     /// A map for tracking row IDs provided by the VTab-cursor to their corresponding persisted rowid and what partition it is stored in.
@@ -47,17 +46,18 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
     where
         Self: Sized,
     {
+        println!("create");
         // Creation logic for the partition, including SQL table creation
-        let p = match create_partition(db, args, false) {
+        let virtual_table = match create_virtual_table(db, args) {
             Ok(partition) => partition,
             Err(err) => return Err(err.into()),
         };
         // The schema that serves as a interface to the user.
-        let sql = p.get_template().create_table_query();
+        let sql = virtual_table.create_table_query();
         Ok((
-            sql.to_owned(),
+            sql,
             PartitionMetaTable {
-                partition_interface: p,
+                interface: virtual_table,
                 connection: db,
                 rowid_mapper,
             },
@@ -68,33 +68,7 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
     /// This includes dropping all partition tables as well as all associated tables,
     /// ensuring a clean state upon deletion
     fn destroy(&mut self) -> ExtResult<()> {
-        for partition in self
-            .partition_interface
-            .get_lookup()
-            .get_partitions_by_range(
-                self.connection,
-                std::ops::Bound::Unbounded,
-                std::ops::Bound::Unbounded,
-            )?
-        {
-            self.connection
-                .execute(&format!("DROP TABLE {}", partition.1), ())?;
-        }
-
-        &self
-            .partition_interface
-            .get_root()
-            .drop_table(self.connection);
-        self.connection.execute(
-            &self.partition_interface.get_lookup().drop_table_query(),
-            (),
-        )?;
-        self.connection.execute(
-            &self.partition_interface.get_template().drop_table_query(),
-            (),
-        )?;
-
-        Ok(())
+        self.interface.destroy()
     }
 }
 impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
@@ -103,8 +77,8 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
     /// Based on the type of change (insert, update, delete), this method constructs
     /// the appropriate SQL statements and executes them.
     fn update(&'vtab self, info: &mut ChangeInfo) -> ExtResult<i64> {
-        let (sql, params) = match info.change_type() {
-            ChangeType::Insert => insert(&self.partition_interface, self.connection, info)?,
+        match info.change_type() {
+            ChangeType::Insert => insert(&self.interface, info)?,
             ChangeType::Update => {
                 let rowid_mapper = self.rowid_mapper.read().map_err(|e| {
                     sqlite3_ext::Error::Sqlite(1, Some(format!("Lock acquisition failed: {}", e)))
@@ -112,12 +86,10 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                 let id = info.rowid_mut().get_i64();
                 if let Some((db_rowid, partition_name)) = rowid_mapper.get(&id) {
                     let (sql, mut values) =
-                        update(partition_name, &self.partition_interface, info.args_mut());
+                        update(partition_name, &self.interface, info.args_mut());
                     let mut stmt = self.connection.prepare(&sql)?;
                     values.iter_mut().enumerate().for_each(|(index, value)| {
-                        value
-                            .bind_param(stmt.borrow_mut(), (index + 1) as i32)
-                            .unwrap();
+                        value.bind_param(&mut stmt, (index + 1) as i32).unwrap();
                     });
 
                     db_rowid
@@ -143,8 +115,9 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                 return Ok(id);
             }
         };
+        Ok(1)
 
-        self.connection.execute(&sql, params)
+        // self.connection.execute(&sql, params)
     }
 }
 impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
@@ -160,23 +133,23 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
     fn connect(
         db: &'vtab VTabConnection,
         rowid_mapper: &'vtab Self::Aux,
-
         args: &[&str],
     ) -> ExtResult<(String, Self)>
     where
         Self: Sized,
     {
         // Connection logic, similar to `create` but for establishing connections without creating tables.
-        let p = match create_partition(db, args, false) {
+        let p = match connect_to_virtual_table(db, args[2]) {
             Ok(partition) => partition,
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(err),
         };
         let connection = db;
 
+        println!("{:#?}", p.create_table_query().to_string());
         Ok((
-            p.get_template().create_table_query().to_owned(),
+            p.create_table_query().to_string(),
             PartitionMetaTable {
-                partition_interface: p,
+                interface: p,
                 connection,
                 rowid_mapper, // rows: None,
             },
@@ -196,6 +169,8 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
     /// as where clauses to apply to the actual partition tables.
 
     fn best_index(&self, index_info: &mut sqlite3_ext::vtab::IndexInfo) -> ExtResult<()> {
+        println!("best index");
+
         let mut argv_index = 0;
         for mut constraint in index_info.constraints() {
             if constraint.usable() {
@@ -204,14 +179,27 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
             }
         }
         index_info.set_estimated_cost(1.0); // Set a default cost, could be refined.
-        let mut where_clauses = construct_where_clause(index_info, &self.partition_interface)?;
-        let partition_column = where_clauses.get_key_value("partition_table");
-        let lookup_where_clause = match partition_column {
-            Some((_name, constraints)) => constraints
+        let mut where_clauses = construct_where_clause(index_info, &self.interface)?;
+        let partitions_where_clauses =
+            where_clauses.get(self.interface.lookup().partition_table_column().get_name());
+
+        let partition_column_constraints = partitions_where_clauses.map(|clauses| {
+            clauses
+                .iter()
+                .filter(|clause| clause.get_name() == self.interface.partition_column_name())
+                .collect::<Vec<&WhereClause>>()
+        });
+        let lookup_where_clause = match partition_column_constraints {
+            Some(constraints) => constraints
                 .iter()
                 .map(|constraint| {
                     let wherec = WhereClause {
-                        column_name: "partition_value".to_string(),
+                        column_name: self
+                            .interface
+                            .lookup()
+                            .partition_value_column()
+                            .get_name()
+                            .to_owned(),
                         operator: constraint.operator,
                         constraint_index: constraint.constraint_index,
                     };
@@ -223,6 +211,7 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
 
         lookup_where_clause
             .and_then(|clause| where_clauses.insert("lookup_table".to_string(), clause));
+
         index_info.set_index_str(Some(&ron::to_string(&where_clauses).unwrap()))?;
 
         Ok(())

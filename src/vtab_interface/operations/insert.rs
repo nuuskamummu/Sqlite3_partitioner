@@ -1,28 +1,31 @@
 use crate::{
-    shadow_tables::operations::Table, utils::validate_and_map_columns, vtab_interface::*, Partition,
+    shadow_tables::interface::VirtualTable, utils::validation::validate_and_map_columns,
+    vtab_interface::*,
 };
-use sqlite3_ext::{Connection, Value};
 
 pub fn insert<'vtab>(
-    partition: &'vtab Partition<i64>,
-    connection: &'vtab Connection,
+    interface: &'vtab VirtualTable,
     info: &mut ChangeInfo,
-) -> sqlite3_ext::Result<(String, Vec<Value>)> {
-    let columns =
-        validate_and_map_columns(&info.args()[1..], partition.get_template().columns().into())?;
-    let partition_column = columns
-        .iter()
-        .find(|&(col_name, _)| col_name == &partition.get_root().partition_column)
-        .ok_or_else(|| {
-            sqlite3_ext::Error::Sqlite(
+) -> sqlite3_ext::Result<i64> {
+    let (columns, partition_column) = validate_and_map_columns(
+        &info.args()[1..],
+        interface.columns().into(),
+        interface.partition_column_name(),
+    )?;
+
+    let partition_column = match partition_column {
+        Some(value) => value,
+        None => {
+            return Err(sqlite3_ext::Error::Sqlite(
                 SQLITE_NOTFOUND,
                 Some("Partition column not found".to_string()),
-            )
-        })?;
+            ))
+        }
+    };
+    let partition_value = parse_partition_value(partition_column, interface.partition_interval())?;
+    let partition_name: String = interface.get_partition(&partition_value)?;
+    // let sql = prepare_insert_statement(&partition_name, columns.len());
 
-    let bucket = parse_partition_value(&partition_column.1, partition.get_root().get_interval())?;
-    let partition_name: String = resolve_partition_name(partition, connection, bucket)?;
-    let sql = prepare_insert_statement(&partition_name, columns.len());
-    let variadic_values = prepare_variadic_values(&columns);
-    Ok((sql, variadic_values))
+    // let variadic_values = prepare_variadic_values(&columns);
+    interface.insert(&partition_name, columns)
 }

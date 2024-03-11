@@ -2,7 +2,7 @@ pub mod operations;
 mod vtab_cursor;
 mod vtab_module;
 
-use crate::{vtab_interface::vtab_module::*, Partition};
+use crate::{shadow_tables::interface::VirtualTable, vtab_interface::vtab_module::*};
 use operations::create::*;
 use serde::{Deserialize, Serialize};
 use sqlite3_ext::{
@@ -19,10 +19,7 @@ use std::{
     sync::RwLock,
 };
 
-use crate::{
-    utils::{parse_partition_value, resolve_partition_name},
-    ConstraintOpDef, PartitionAccessor,
-};
+use crate::{utils::parse_partition_value, ConstraintOpDef};
 
 #[sqlite3_ext_main]
 fn init(db: &Connection) -> ExtResult<()> {
@@ -44,16 +41,20 @@ struct WhereClause {
     constraint_index: i32,
 }
 impl WhereClause {
-    fn get_name(&self) -> String {
-        self.column_name.clone()
+    fn get_name(&self) -> &str {
+        &self.column_name
     }
-    fn _get_operator(&self) -> ConstraintOp {
-        self.operator
+    fn get_operator(&self) -> &ConstraintOp {
+        &self.operator
     }
     fn _get_constraint_index(&self) -> i32 {
         self.constraint_index
     }
 }
+
+// impl<'a> FromIterator<&'a WhereClause> for Vec<&'a WhereClause> {
+//     fn from_iter<T: IntoIterator<Item = &'a WhereClause>>(iter: T) -> Self {}
+// }
 #[derive(Serialize, Deserialize, Debug)]
 struct WhereClauses(HashMap<String, Vec<WhereClause>>);
 impl Deref for WhereClauses {
@@ -91,9 +92,9 @@ impl Display for WhereClause {
     }
 }
 
-fn construct_where_clause<T>(
+fn construct_where_clause(
     index_info: &sqlite3_ext::vtab::IndexInfo,
-    partition: &Partition<T>,
+    virtual_table: &VirtualTable,
 ) -> ExtResult<WhereClauses> {
     let mut column_name_map: HashMap<String, Vec<(IndexInfoConstraint, i32)>> = HashMap::new();
     for (index, constraint) in index_info
@@ -101,7 +102,7 @@ fn construct_where_clause<T>(
         .enumerate()
         .filter(|(_index, c)| c.usable())
     {
-        let column_name = partition.columns[constraint.column() as usize]
+        let column_name = virtual_table.columns().0[constraint.column() as usize]
             .get_name()
             .to_owned();
         column_name_map
@@ -119,9 +120,15 @@ fn construct_where_clause<T>(
                     column_name: column_name.into(),
                     operator: constraint.op(),
                     constraint_index: *index,
+                    // right_hand_value: constraint
+                    //     .rhs()
+                    //     .map_or_else(|err| None, |value| Some(value.to_owned()?)),
                 })
                 .collect::<Vec<WhereClause>>();
-            ("partition_table".to_string(), clauses)
+            (
+                virtual_table.lookup().partition_table_column().to_string(),
+                clauses,
+            )
         })
         .collect();
     Ok(where_clauses)

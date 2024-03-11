@@ -6,7 +6,7 @@ use std::{
 
 use chrono::{NaiveDate, NaiveDateTime};
 use regex::Regex;
-use sqlite3_ext::{ffi::SQLITE_FORMAT, vtab::ConstraintOp, Value, ValueType};
+use sqlite3_ext::{ffi::SQLITE_FORMAT, vtab::ConstraintOp, FromValue, Value, ValueRef, ValueType};
 
 use crate::{
     error::TableError,
@@ -14,7 +14,7 @@ use crate::{
     PartitionColumn,
 };
 
-pub fn parse_partition_value(value: &Value, interval: i64) -> sqlite3_ext::Result<i64> {
+pub fn parse_partition_value(value: &ValueRef, interval: i64) -> sqlite3_ext::Result<i64> {
     parse_to_unix_epoch(value).map(|epoch| epoch - epoch % interval)
 }
 /// Converts a [`sqlite3_ext::ValueType`] to a [&`str`]
@@ -102,12 +102,12 @@ fn parse_datetime_to_epoch(datetime_str: &str) -> sqlite3_ext::Result<i64> {
 
 /// Parses an incoming [sqlite3_ext::ValueType] to UNIX epoch.
 // TODO improve!
-pub fn parse_to_unix_epoch(value: &Value) -> sqlite3_ext::Result<i64> {
-    match value {
-        Value::Integer(epoch) => Ok(*epoch),
-        Value::Float(float_epoch) => Ok(float_epoch.round() as i64), // Assuming rounding is the desired behavior
-        Value::Text(datetime_str) => parse_datetime_to_epoch(datetime_str),
-        Value::Blob(_) | Value::Null => Err(sqlite3_ext::Error::Sqlite(
+pub fn parse_to_unix_epoch(value: &ValueRef) -> sqlite3_ext::Result<i64> {
+    match value.value_type() {
+        ValueType::Integer => Ok(value.get_i64()),
+        ValueType::Float => Ok(value.get_f64() as i64), // Assuming rounding is the desired behavior
+        ValueType::Text => parse_datetime_to_epoch(value.try_get_str()?),
+        ValueType::Blob | ValueType::Null => Err(sqlite3_ext::Error::Sqlite(
             SQLITE_FORMAT,
             Some("Could not parse value to UNIX epoch".to_string()),
         )),
@@ -249,10 +249,10 @@ use std::ops::Bound::{self, *};
 /// - `operator`: The comparison operator used in the condition (e.g., "=", ">", "<=").
 /// - `value`: The numeric value used for comparison in the condition.
 #[derive(Debug, PartialEq)]
-pub struct Condition {
-    pub column: String,
-    pub operator: ConstraintOp,
-    pub value: Value,
+pub struct Condition<'a> {
+    pub column: &'a str,
+    pub operator: &'a ConstraintOp,
+    pub value: &'a ValueRef,
 }
 
 //
@@ -263,22 +263,22 @@ pub struct Condition {
 ///
 /// Returns:
 /// - A HashMap where each key is a column name and its value is a tuple representing the range as lower and upper bounds.
-pub fn aggregate_conditions_to_ranges(
-    conditions: Vec<Condition>,
+pub fn aggregate_conditions_to_ranges<'a>(
+    conditions: &'a [Condition],
     interval: i64,
-) -> HashMap<String, (Bound<i64>, Bound<i64>)> {
-    let mut ranges: HashMap<String, (Bound<i64>, Bound<i64>)> = HashMap::new();
+) -> HashMap<&'a str, (Bound<i64>, Bound<i64>)> {
+    let mut ranges: HashMap<&'a str, (Bound<i64>, Bound<i64>)> = HashMap::new();
 
     for condition in conditions {
-        let partition_start = parse_partition_value(&condition.value, interval).unwrap(); //TODO handle
-                                                                                          //error
+        let partition_start = parse_partition_value(condition.value, interval).unwrap(); //TODO handle
+                                                                                         //error
 
         ranges
-            .entry(condition.column.clone())
+            .entry(condition.column)
             .and_modify(|e| {
-                update_bound(e, &condition.operator, partition_start, interval);
+                update_bound(e, condition.operator, partition_start, interval);
             })
-            .or_insert_with(|| initial_bound(&condition.operator, partition_start, interval));
+            .or_insert_with(|| initial_bound(condition.operator, partition_start, interval));
     }
 
     ranges
