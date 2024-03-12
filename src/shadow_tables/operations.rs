@@ -27,12 +27,6 @@ pub trait Table {
     fn format_name(base_name: &str) -> String {
         format!("{base_name}_{}", Self::POSTFIX)
     }
-    fn get_base_name(&self) -> Option<&str> {
-        match &self.name().split_once("_") {
-            Some(value) => Some(value.0),
-            None => None,
-        }
-    }
 }
 
 pub trait Create: Table {
@@ -108,36 +102,7 @@ pub trait Connect: Table {
         ))
     }
 }
-pub trait Copy: Table {
-    /// Copies the template table in the database, appending a suffix to the new table's name.
-    fn copy(&self, suffix: &str, db: &Connection) -> ExtResult<String> {
-        let sql = self.copy_query(suffix);
-        Connection::execute(db, &sql, ())?;
-        Ok(format!("{}_{}", self.get_base_name().unwrap(), suffix).to_string())
-    }
-    fn copy_query(&self, suffix: &str) -> String {
-        format!(
-            "CREATE TABLE IF NOT EXISTS {}_{} AS SELECT * FROM {};",
-            self.get_base_name().unwrap(),
-            suffix,
-            self.name()
-        )
-    }
-    fn prepare_copy_template<'a>(
-        &'a self,
-        suffix: &'a str,
-        db: &'a Connection,
-    ) -> impl Fn() -> ExtResult<String> + 'a {
-        let sql = self.copy_query(suffix);
-        move || {
-            let result = db.execute(&sql, ());
-            match result {
-                Ok(_) => Ok(format!("{}_{}", self.get_base_name().unwrap(), suffix).to_string()),
-                Err(err) => Err(err),
-            }
-        }
-    }
-}
+
 pub trait Drop: Table {
     fn drop_table(&self, db: &Connection) -> ExtResult<()> {
         let sql = self.drop_table_query();

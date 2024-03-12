@@ -2,19 +2,17 @@ use sqlite3_ext::query::ToParam;
 use sqlite3_ext::Connection;
 use sqlite3_ext::ValueRef;
 
-use crate::ColumnDeclaration;
 use crate::ColumnDeclarations;
 use crate::LookupTable;
 use crate::RootTable;
 use crate::TemplateTable;
 
-use super::operations::Copy;
 use super::operations::Drop;
 use super::operations::Table;
 
 #[derive(Debug)]
 pub struct VirtualTable<'vtab> {
-    connection: &'vtab Connection,
+    pub connection: &'vtab Connection,
     base_name: String,
     template_table: TemplateTable,
     root_table: RootTable,
@@ -68,17 +66,54 @@ impl<'vtab> VirtualTable<'vtab> {
         self.template_table.drop_table(self.connection)?;
         Ok(())
     }
+    /// If partition does not already exists, this method will copy the template table, and
+    /// updating lookup table before returning the name for the (newly created) partition
     pub fn get_partition(&self, partition_value: &i64) -> sqlite3_ext::Result<String> {
         self.lookup_table
-            .get_partition(self.connection, partition_value)
-            .and_then(|(name, should_create)| {
-                if should_create {
-                    self.template_table
-                        .copy(&partition_value.to_string(), self.connection)
-                } else {
-                    Ok(name)
+            .get_partition(partition_value)
+            .and_then(|name| match name {
+                None => {
+                    let new_partition_name =
+                        self.copy(&partition_value.to_string(), self.connection)?;
+                    self.lookup_table.insert(
+                        self.connection,
+                        &new_partition_name,
+                        *partition_value,
+                    )?;
+                    Ok(new_partition_name)
                 }
+                Some(name) => Ok(name.to_owned()),
             })
+    }
+    fn copy(&self, suffix: &str, db: &Connection) -> sqlite3_ext::Result<String> {
+        let new_table_name = self.format_new_table_name(suffix);
+        let sql = self.copy_query(&new_table_name);
+        Connection::execute(db, &sql, ())?;
+        Ok(new_table_name)
+    }
+    fn format_new_table_name(&self, suffix: &str) -> String {
+        format!("{}_{}", self.base_name, suffix)
+    }
+    fn copy_query(&self, new_table_name: &str) -> String {
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} AS SELECT * FROM {};",
+            new_table_name,
+            self.template_table.name()
+        )
+    }
+    fn prepare_copy_template<'a>(
+        &'a self,
+        new_table_name: &'a str,
+        db: &'a Connection,
+    ) -> impl Fn() -> sqlite3_ext::Result<&'a str> + 'a {
+        let sql = self.copy_query(new_table_name);
+        move || {
+            let result = db.execute(&sql, ());
+            match result {
+                Ok(_) => Ok(new_table_name),
+                Err(err) => Err(err),
+            }
+        }
     }
     /// Create table query from the template table.
     pub fn create_table_query(&self) -> String {
@@ -97,12 +132,13 @@ impl<'vtab> VirtualTable<'vtab> {
         &self.lookup_table
     }
 
-    pub fn insert(&self, partition_name: &str, columns: &[&ValueRef]) -> sqlite3_ext::Result<i64> {
+    pub fn insert(&self, partition_value: i64, columns: &[&ValueRef]) -> sqlite3_ext::Result<i64> {
+        let partition = self.get_partition(&partition_value)?;
         let placeholders = std::iter::repeat("?")
             .take(columns.len())
             .collect::<Vec<_>>()
             .join(",");
-        let sql = format!("INSERT INTO {} VALUES({})", partition_name, placeholders);
+        let sql = format!("INSERT INTO {} VALUES({})", partition, placeholders);
         let mut stmt = self.connection.prepare(&sql)?;
         for (index, &column) in columns.iter().enumerate() {
             column.bind_param(&mut stmt, (index + 1) as i32)?
@@ -110,3 +146,18 @@ impl<'vtab> VirtualTable<'vtab> {
         stmt.insert(())
     }
 }
+
+// #[test]
+// fn test_db_copy() {
+//     let conn = match Connection::open_in_memory() {
+//         Ok(conn) => conn,
+//         Err(err) => panic!("{}", err.to_string()),
+//     };
+//     let conn = Connection::from_rusqlite(&conn);
+//     let (name, columns) = mock_template();
+//     let table = TemplateTable::create(conn, &name, columns).unwrap();
+//
+//     let copy_result = table.copy("10000", conn).unwrap();
+//
+//     assert_eq!(copy_result, "test_10000");
+// }

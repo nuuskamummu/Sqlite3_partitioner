@@ -1,6 +1,6 @@
 use sqlite3_ext::{FromValue, ValueRef};
 
-use crate::{error::TableError, ColumnDeclaration, PartitionAccessor};
+use crate::{error::TableError, ColumnDeclaration};
 
 use super::{parse_to_unix_epoch, parsing::value_type_to_string};
 
@@ -26,28 +26,24 @@ pub fn validate_and_map_columns<'a>(
     partition_column_name: &'a str,
 ) -> sqlite3_ext::Result<(&'a [&'a ValueRef], Option<&'a ValueRef>)> {
     let mut partition_column: Option<&ValueRef> = None;
-    let a: sqlite3_ext::Result<Vec<(String, &ValueRef)>> = info
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| {
-            let reference_column = &column_declarations[i]; //info is always in the same order as the table was declared in.
-
-            if reference_column.get_name() == partition_column_name {
-                partition_column = Some(v);
+    info.iter().enumerate().try_for_each(|(i, &v)| {
+        let reference_column = &column_declarations[i]; //info is always in the same order as the table was declared in.
+        if reference_column.get_name() == partition_column_name {
+            partition_column = Some(v);
+        }
+        if &v.value_type() == reference_column.data_type()
+            || (reference_column.get_type().to_uppercase() == "TIMESTAMP"
+                && parse_to_unix_epoch(v).is_ok())
+        {
+            Ok(())
+        } else {
+            let e: sqlite3_ext::Error = TableError::ColumnTypeMismatch {
+                expected: value_type_to_string(reference_column.data_type()),
+                found: value_type_to_string(&v.value_type()),
             }
-            if &v.value_type() == reference_column.data_type()
-                || (reference_column.get_type().to_uppercase() == "TIMESTAMP"
-                    && parse_to_unix_epoch(v).is_ok())
-            {
-                Ok((":".to_string() + reference_column.get_name(), v))
-            } else {
-                Err(TableError::ColumnTypeMismatch {
-                    expected: value_type_to_string(reference_column.data_type()),
-                    found: value_type_to_string(&v.value_type()),
-                }
-                .into())
-            }
-        })
-        .collect();
+            .into();
+            Err(e)
+        }
+    })?;
     Ok((info, partition_column))
 }

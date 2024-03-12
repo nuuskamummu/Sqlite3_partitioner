@@ -159,10 +159,11 @@ impl LookupTable<i64> {
     fn insert_query(&self) -> String {
         let partition_table_name = self.partition_table_column().get_name().to_owned();
         let partition_value_name = self.partition_value_column().get_name().to_owned();
-        format!(
+        let sql = format!(
             "INSERT INTO {} ({partition_table_name}, {partition_value_name}) VALUES (?, ?)",
             self.name()
-        )
+        );
+        sql
     }
     /// Retrieves a partition from the lookup table based on the provided bucket value.
     ///
@@ -176,23 +177,14 @@ impl LookupTable<i64> {
     /// # Returns
     /// - `Result<(String, bool)>`: The name of the partition table and a boolean indicating
     ///   whether the table needs to be created.
-    pub fn get_partition(
-        &self,
-        db: &Connection,
-        partition_value: &i64,
-    ) -> ExtResult<(String, bool)> {
-        self.sync(db)?;
+    pub fn get_partition(&self, partition_value: &i64) -> sqlite3_ext::Result<Option<String>> {
         let borrowed_partitions = self.partitions.read().map_err(|err| {
             sqlite3_ext::Error::Sqlite(1, Some(format!("Error reading partitions: {}", err)))
         })?;
 
-        let r = match borrowed_partitions.get(partition_value) {
-            Some(value) => Ok(value.to_owned()),
-            None => self.insert(db, *partition_value),
-        }?;
-
-        drop(borrowed_partitions);
-        Ok((r, false))
+        Ok(borrowed_partitions
+            .get(partition_value)
+            .map(|name| name.to_owned()))
     }
 
     /// Synchronizes the in-memory partitions map with the current state of the lookup table in the database.
@@ -253,58 +245,6 @@ impl LookupTable<i64> {
             borrowed_partitions.insert(partition_value, partition_table_name.to_string());
         }
 
-        drop(borrowed_partitions);
-
-        Ok(())
-    }
-
-    /// Performs a custom synchronization of the partitions map based on a specified SQL `WHERE` clause.
-    ///
-    /// This method allows for selective synchronization of partitions that meet certain conditions.
-    ///
-    /// # Parameters
-    /// - `db`: A reference to the database connection.
-    /// - `where_clause`: The SQL `WHERE` clause specifying the conditions for synchronization.
-    ///
-    /// # Returns
-    /// - `Result<()>`: Indicates success or failure of the custom synchronization process.
-    fn custom_sync(&self, db: &Connection, where_clause: String) -> ExtResult<()> {
-        let mut borrowed_partitions = self.partitions.write().map_err(|err| {
-            sqlite3_ext::Error::Sqlite(
-                1,
-                Some(format!(
-                    "Error acquiring write permissions to partitions: {}",
-                    err
-                )),
-            )
-        })?;
-        borrowed_partitions.clear();
-        let local_partition_values = borrowed_partitions.keys().cloned().collect::<Vec<i64>>();
-
-        let placeholders = std::iter::repeat("?")
-            .take(local_partition_values.len()) // Directly use the length of the keys vector
-            .collect::<Vec<&str>>()
-            .join(",");
-
-        let sql = format!(
-            "SELECT {}, {} FROM {} WHERE {} NOT IN ({}) AND {};",
-            self.partition_value_column().get_name(),
-            self.partition_table_column().get_name(),
-            self.name(),
-            self.partition_value_column().get_name(),
-            placeholders,
-            where_clause
-        ); //
-
-        let mut statement = db.prepare(&sql)?;
-
-        let results = statement.query(local_partition_values)?;
-        while let Ok(Some(row)) = results.next() {
-            let partition_value = row[1].get_i64();
-
-            let partition_table_name = row[0].get_str().to_owned()?;
-            borrowed_partitions.insert(partition_value, partition_table_name.to_string());
-        }
         drop(borrowed_partitions);
 
         Ok(())
@@ -380,10 +320,14 @@ impl LookupTable<i64> {
     ///
     /// # Returns
     /// - `Result<String>`: The name of the newly inserted partition table.
-    fn insert(&self, db: &Connection, partition_value: i64) -> ExtResult<String> {
-        let partition_table_name = format!("{}_{}", self.get_base_name().unwrap(), partition_value);
+    pub(crate) fn insert<'a>(
+        &'a self,
+        db: &Connection,
+        partition_name: &'a str,
+        partition_value: i64,
+    ) -> ExtResult<&str> {
         Connection::prepare(db, &self.insert_query())?.execute(|stmt: &mut Statement| {
-            partition_table_name.bind_param(stmt, 1)?;
+            partition_name.bind_param(stmt, 1)?;
             partition_value.bind_param(stmt, 2)?;
 
             Ok(())
@@ -399,14 +343,17 @@ impl LookupTable<i64> {
             )
         })?;
 
-        borrowed_partitions.insert(partition_value, partition_table_name.clone());
+        borrowed_partitions.insert(partition_value, partition_name.to_string());
 
-        Ok(partition_table_name)
+        Ok(partition_name)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::shadow_tables::interface::VirtualTable;
+    use crate::ColumnDeclarations;
+
     use super::*;
 
     use rusqlite::Connection as RusqConn;
@@ -422,17 +369,18 @@ mod tests {
         RusqConn::open_in_memory().unwrap()
     }
 
-    // Function to create a LookupTable instance for testing
-    // fn setup_lookup_table() -> LookupTable<i64> {
-    //     LookupTable {
-    //         base_name: "test".to_string(),
-    //         partitions: RwLock::new(std::collections::BTreeMap::new()),
-    //     }
-    // }
+    fn setup_lookup_table<'a>(db: &'a Connection) -> VirtualTable<'a> {
+        let declarations =
+            ColumnDeclarations::from_iter(&["col1 timestamp partition_column", "col2 text"]);
+
+        let virutal_table =
+            VirtualTable::create(db, "test", declarations, "col1".to_string(), 3600).unwrap();
+        virutal_table
+    }
     // #[test]
     // fn test_create_table_query() {
     //     let lookup_table = setup_lookup_table();
-    //     let query = lookup_table.create_table_query().unwrap();
+    //     let query = lookup_table.lookup.();
     //     assert_eq!(
     //         query,
     //         "CREATE TABLE test_lookup (partition_table varchar UNIQUE, partition_value integer UNIQUE);"
@@ -442,19 +390,14 @@ mod tests {
     fn test_insert() -> SqlResult<()> {
         let rusq_conn = init_rusq_conn();
         let db = setup_db(&rusq_conn);
-        let lookup_table = LookupTable::create(db, "test").unwrap();
+        let virtual_table = setup_lookup_table(db);
+        let lookup = virtual_table.lookup();
         let partition_value = 1i64;
-        let expected_table_name = format!(
-            "{}_{}",
-            lookup_table.get_base_name().unwrap(),
-            partition_value
-        );
-
-        lookup_table.insert(db, partition_value)?;
-
-        let partition = lookup_table.get_partition(db, &partition_value).unwrap();
-        assert!(!partition.1);
-        assert_eq!(partition.0, expected_table_name);
+        let partition_name = lookup.get_partition(&partition_value)?;
+        assert!(partition_name.is_none());
+        let partition_name = "test_1";
+        let partition = lookup.insert(virtual_table.connection, partition_name, partition_value)?;
+        assert_eq!(partition, partition_name);
 
         Ok(())
     }
@@ -462,11 +405,18 @@ mod tests {
     fn test_sync() -> sqlite3_ext::Result<()> {
         let rusq_conn = init_rusq_conn();
         let db = setup_db(&rusq_conn);
-        let lookup_table = LookupTable::create(db, "test").unwrap();
+        let virtual_table = setup_lookup_table(db);
+        let lookup_table = virtual_table.lookup();
         // Pre-insert a partition to simulate existing database state
         let partition_values = [1710003600, 1710000000, 1710007200];
         for partition_value in partition_values {
-            lookup_table.insert(db, partition_value)?;
+            lookup_table.insert(
+                virtual_table.connection,
+                &format!("test_{}", partition_value),
+                partition_value,
+            )?;
+            let partition_name = lookup_table.get_partition(&partition_value)?;
+            assert!(partition_name.is_some());
         }
 
         // Clear the in-memory map to simulate out-of-sync state
@@ -474,12 +424,16 @@ mod tests {
             let mut partitions = lookup_table.partitions.write().unwrap();
             partitions.clear();
         }
+        for partition_value in partition_values {
+            let partition_name = lookup_table.get_partition(&partition_value)?;
+            assert!(partition_name.is_none());
+        }
 
         // Run sync to update in-memory map
-        lookup_table.sync(db)?;
+        lookup_table.sync(virtual_table.connection)?;
 
-        let partition = lookup_table.get_partition(db, &1710003600)?;
-        assert_eq!(partition.0, "test_1710003600".to_string());
+        let partition = lookup_table.get_partition(&1710003600)?.unwrap();
+        assert_eq!(partition, "test_1710003600".to_string());
 
         Ok(())
     }

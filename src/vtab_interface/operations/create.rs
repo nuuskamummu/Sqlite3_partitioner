@@ -5,7 +5,6 @@ use crate::ColumnDeclaration;
 use crate::ColumnDeclarations;
 use crate::PartitionColumn;
 use sqlite3_ext::Connection;
-use sqlite3_ext::Value;
 use sqlite3_ext::ValueType;
 extern crate sqlite3_ext;
 

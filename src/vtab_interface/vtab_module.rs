@@ -78,7 +78,7 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
     /// the appropriate SQL statements and executes them.
     fn update(&'vtab self, info: &mut ChangeInfo) -> ExtResult<i64> {
         match info.change_type() {
-            ChangeType::Insert => insert(&self.interface, info)?,
+            ChangeType::Insert => insert(&self.interface, info),
             ChangeType::Update => {
                 let rowid_mapper = self.rowid_mapper.read().map_err(|e| {
                     sqlite3_ext::Error::Sqlite(1, Some(format!("Lock acquisition failed: {}", e)))
@@ -98,7 +98,7 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                     stmt.execute(())?;
                 }
 
-                return Ok(id);
+                Ok(id)
             }
             ChangeType::Delete => {
                 let rowid_mapper = self.rowid_mapper.write().map_err(|e| {
@@ -112,12 +112,9 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                     stmt.execute(())?;
                 }
 
-                return Ok(id);
+                Ok(id)
             }
-        };
-        Ok(1)
-
-        // self.connection.execute(&sql, params)
+        }
     }
 }
 impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {

@@ -134,7 +134,7 @@ impl Into<String> for ColumnDeclarations {
             .into_iter()
             .map::<String, _>(|col| col.to_string())
             .collect::<Vec<String>>()
-            .join(" ,")
+            .join(", ")
     }
 }
 
