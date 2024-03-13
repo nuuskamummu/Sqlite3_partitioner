@@ -73,8 +73,7 @@ impl<'vtab> VirtualTable<'vtab> {
             .get_partition(partition_value)
             .and_then(|name| match name {
                 None => {
-                    let new_partition_name =
-                        self.copy(&partition_value.to_string(), self.connection)?;
+                    let new_partition_name = self.copy(&partition_value.to_string())?;
                     self.lookup_table.insert(
                         self.connection,
                         &new_partition_name,
@@ -85,36 +84,29 @@ impl<'vtab> VirtualTable<'vtab> {
                 Some(name) => Ok(name.to_owned()),
             })
     }
-    fn copy(&self, suffix: &str, db: &Connection) -> sqlite3_ext::Result<String> {
+    fn copy(&self, suffix: &str) -> sqlite3_ext::Result<String> {
         let new_table_name = self.format_new_table_name(suffix);
-        let sql = self.copy_query(&new_table_name);
-        Connection::execute(db, &sql, ())?;
+        self.template_table.copy(&new_table_name, self.connection)?;
         Ok(new_table_name)
     }
     fn format_new_table_name(&self, suffix: &str) -> String {
         format!("{}_{}", self.base_name, suffix)
     }
-    fn copy_query(&self, new_table_name: &str) -> String {
-        format!(
-            "CREATE TABLE IF NOT EXISTS {} AS SELECT * FROM {};",
-            new_table_name,
-            self.template_table.name()
-        )
-    }
-    fn prepare_copy_template<'a>(
-        &'a self,
-        new_table_name: &'a str,
-        db: &'a Connection,
-    ) -> impl Fn() -> sqlite3_ext::Result<&'a str> + 'a {
-        let sql = self.copy_query(new_table_name);
-        move || {
-            let result = db.execute(&sql, ());
-            match result {
-                Ok(_) => Ok(new_table_name),
-                Err(err) => Err(err),
-            }
-        }
-    }
+
+    // fn prepare_copy_template<'a>(
+    //     &'a self,
+    //     new_table_name: &'a str,
+    //     db: &'a Connection,
+    // ) -> impl Fn() -> sqlite3_ext::Result<&'a str> + 'a {
+    //     let sql = self.copy_query(new_table_name);
+    //     move || {
+    //         let result = db.execute(&sql, ());
+    //         match result {
+    //             Ok(_) => Ok(new_table_name),
+    //             Err(err) => Err(err),
+    //         }
+    //     }
+    // }
     /// Create table query from the template table.
     pub fn create_table_query(&self) -> String {
         self.template_table.schema().table_query().clone()
