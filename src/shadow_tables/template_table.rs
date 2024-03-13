@@ -1,15 +1,9 @@
 use std::ops::IndexMut;
 
-use crate::ColumnDeclarations;
-use sqlite3_ext::{Connection, FallibleIterator, FallibleIteratorMut, FromValue, Result};
-use sqlparser::{
-    ast::{Ident, ObjectName, Statement},
-    dialect::SQLiteDialect,
-    parser::Parser,
-};
-
 use super::operations::{Connect, Create, Drop, SchemaDeclaration, Table};
-/// Represents a template table with a name and a list of column declarations.
+use crate::{shadow_tables::operations::Copy, ColumnDeclarations};
+use sqlite3_ext::{Connection, FallibleIterator, FallibleIteratorMut, FromValue, Result};
+use sqlparser::{dialect::SQLiteDialect, parser::Parser};
 #[derive(Debug)]
 pub struct TemplateTable {
     pub(super) schema: SchemaDeclaration,
@@ -20,6 +14,7 @@ impl Table for TemplateTable {
         &self.schema
     }
 }
+impl Copy for TemplateTable {}
 impl Create for TemplateTable {}
 impl Drop for TemplateTable {}
 impl Connect for TemplateTable {}
@@ -41,7 +36,7 @@ impl TemplateTable {
     }
     fn copy_query(&self, new_table_name: &str) -> String {
         format!(
-            "CREATE TABLE IF NOT EXISTS {} AS SELECT * FROM {};",
+            "CREATE TABLE IF NOT EXISTS {} AS SELECT * FROM {}",
             new_table_name,
             self.name()
         )
@@ -55,7 +50,9 @@ impl TemplateTable {
         Connection::execute(db, &sql, ())?;
         Ok(new_table_name)
     }
-    pub fn copy_indices_query(&self, db: &Connection, new_table: String) -> Result<Vec<String>> {
+    // This function abstracts the logic for adjusting the index creation SQL.
+
+    pub fn copy_indices_query(&self, db: &Connection, new_table: &str) -> Result<Vec<String>> {
         let dialect = SQLiteDialect {};
         let parser = Parser::new(&dialect);
         let schema_sql = format!(
@@ -75,40 +72,9 @@ impl TemplateTable {
 
         let index_queries = statements
             .iter()
-            .map(|statement| match statement.to_owned() {
-                Statement::CreateIndex {
-                    name,
-                    table_name,
-                    using,
-                    columns,
-                    unique,
-                    concurrently,
-                    if_not_exists,
-                    include,
-                    nulls_distinct,
-                    predicate,
-                } => Statement::CreateIndex {
-                    name: Some(ObjectName(vec![Ident::new(format!(
-                        "{}_{}",
-                        name.unwrap(),
-                        new_table.clone()
-                    ))])),
-                    table_name: ObjectName(vec![Ident::new(new_table.clone())]),
-                    using,
-                    columns,
-                    unique,
-                    concurrently,
-                    if_not_exists,
-                    include,
-                    nulls_distinct,
-                    predicate,
-                }
-                .to_string(),
-                _ => unreachable!(),
-            })
+            .map(|statement| <Self as Copy>::adjust_index_creation_statement(statement, new_table))
             .collect::<Vec<String>>();
 
-        println!("index queries {:#?}", index_queries);
         index_queries
             .iter()
             .try_for_each::<_, sqlite3_ext::Result<()>>(|query| {
@@ -170,9 +136,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(table.copy("test_100", conn).unwrap(), "test_100");
-        let indexes = table
-            .copy_indices_query(conn, "test_100".to_string())
-            .unwrap();
+        let indexes = table.copy_indices_query(conn, "test_100").unwrap();
 
         assert_eq!(
             indexes[0],

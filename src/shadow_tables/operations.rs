@@ -6,6 +6,8 @@ use sqlite3_ext::Connection;
 use sqlite3_ext::Error as ExtError;
 use sqlite3_ext::FromValue;
 use sqlite3_ext::Result as ExtResult;
+use sqlparser::ast::Ident;
+use sqlparser::ast::ObjectName;
 use sqlparser::ast::Statement as ParsedStatement;
 use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
@@ -29,6 +31,41 @@ pub trait Table {
     }
 }
 
+pub trait Copy: Table {
+    fn adjust_index_creation_statement(statement: &ParsedStatement, new_table: &str) -> String {
+        match statement.to_owned() {
+            ParsedStatement::CreateIndex {
+                name,
+                table_name: _,
+                using,
+                columns,
+                unique,
+                concurrently,
+                if_not_exists,
+                include,
+                nulls_distinct,
+                predicate,
+            } => ParsedStatement::CreateIndex {
+                name: Some(ObjectName(vec![Ident::new(format!(
+                    "{}_{}",
+                    name.unwrap(),
+                    new_table
+                ))])),
+                table_name: ObjectName(vec![Ident::new(new_table)]),
+                using,
+                columns,
+                unique,
+                concurrently,
+                if_not_exists,
+                include,
+                nulls_distinct,
+                predicate,
+            }
+            .to_string(),
+            _ => unreachable!(),
+        }
+    }
+}
 pub trait Create: Table {
     fn schema<'table>(
         db: &Connection,
