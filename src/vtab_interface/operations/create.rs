@@ -8,15 +8,15 @@ use sqlite3_ext::Connection;
 use sqlite3_ext::ValueType;
 extern crate sqlite3_ext;
 
-pub fn connect_to_virtual_table<'a, 'b>(
+pub fn connect_to_virtual_table<'a>(
     db: &'a Connection,
-    table_name: &'b str,
+    table_name: &str,
 ) -> sqlite3_ext::Result<VirtualTable<'a>> {
     VirtualTable::connect(db, table_name)
 }
-pub fn create_virtual_table<'a, 'b>(
+pub fn create_virtual_table<'a>(
     db: &'a Connection,
-    args: &'b [&'b str],
+    args: &[&str],
 ) -> Result<VirtualTable<'a>, TableError> {
     let _module = args[0];
     let _database_name = args[1];
