@@ -74,7 +74,7 @@ impl<'a> TryFrom<&'a str> for ColumnDeclaration {
     fn try_from(value: &'a str) -> Result<Self, Self::Error> {
         let tokens: Vec<&str> = value.split_whitespace().collect();
         let mut is_partition_column = false;
-        println!("{:#?}", tokens);
+
         if tokens.len() != 2 {
             if tokens.len() == 3 && tokens[2] == "partition_column" {
                 is_partition_column = true;

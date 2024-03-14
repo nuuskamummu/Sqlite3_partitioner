@@ -5,9 +5,7 @@ mod partition_interface;
 pub mod root_table;
 pub mod template_table;
 pub use lookup_table::*;
-pub use partition_interface::partition::{
-    Column as PartitionColumn, Partition, Row as PartitionRow,
-};
+pub use partition_interface::partition::Partition;
 
 pub use root_table::*;
 use sqlite3_ext::ValueType;

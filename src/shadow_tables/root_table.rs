@@ -72,7 +72,6 @@ impl RootTable {
             .map(|column| column.get_name().to_string())
             .collect::<Vec<String>>()
             .join(", ");
-        println!("columns: {:#?}", columns);
         let query = format!("SELECT {columns} FROM {table_name}");
         let mut partition_column: String = String::default();
         let mut interval: i64 = 0i64;
@@ -80,9 +79,7 @@ impl RootTable {
             let column_count = row.len();
             for index in 0..column_count {
                 let column = row.index_mut(index);
-                println!("{:#?}", column);
                 let name = column.name()?;
-                println!("column name {:#?}", name);
                 if name.eq(<Self as PartitionType>::partition_name_column().get_name()) {
                     partition_column = column.get_str()?.to_owned();
                 } else if name.eq(<Self as PartitionType>::partition_value_column().get_name()) {
@@ -91,7 +88,6 @@ impl RootTable {
             }
             Ok(())
         })?;
-        println!("partition_column_name {:#?}", partition_column);
         Ok(Self {
             schema,
             partition_column,

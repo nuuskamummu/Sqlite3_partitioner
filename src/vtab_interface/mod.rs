@@ -117,7 +117,7 @@ fn construct_where_clause(
             let clauses = constraints
                 .iter()
                 .map(|(constraint, index)| WhereClause {
-                    column_name: column_name.into(),
+                    column_name: column_name.to_owned(),
                     operator: constraint.op(),
                     constraint_index: *index,
                     // right_hand_value: constraint
@@ -126,7 +126,11 @@ fn construct_where_clause(
                 })
                 .collect::<Vec<WhereClause>>();
             (
-                virtual_table.lookup().partition_table_column().to_string(),
+                virtual_table
+                    .lookup()
+                    .partition_table_column()
+                    .get_name()
+                    .to_owned(),
                 clauses,
             )
         })

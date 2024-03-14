@@ -78,7 +78,6 @@ impl TemplateTable {
         index_queries
             .iter()
             .try_for_each::<_, sqlite3_ext::Result<()>>(|query| {
-                println!("{}", query);
                 db.execute(query, ()).map(|_| ())
             })?;
         Ok(index_queries)

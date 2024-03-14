@@ -31,7 +31,7 @@ pub struct PartitionMetaTable<'vtab> {
     /// A map for tracking row IDs provided by the VTab-cursor to their corresponding persisted rowid and what partition it is stored in.
     /// Needed because persisted rowid are only unique within one table, not across multiple
     /// partitions
-    pub rowid_mapper: &'vtab RwLock<HashMap<i64, (Value, String)>>,
+    pub rowid_mapper: &'vtab RwLock<HashMap<i64, (i64, String)>>,
 }
 impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
     /// Creates a new instance of the partition metadata table.
@@ -46,7 +46,6 @@ impl<'vtab> CreateVTab<'vtab> for PartitionMetaTable<'vtab> {
     where
         Self: Sized,
     {
-        println!("create");
         // Creation logic for the partition, including SQL table creation
         let virtual_table = match create_virtual_table(db, args) {
             Ok(partition) => partition,
@@ -92,9 +91,7 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                         value.bind_param(&mut stmt, (index + 1) as i32).unwrap();
                     });
 
-                    db_rowid
-                        .clone()
-                        .bind_param(stmt.borrow_mut(), (values.len() + 1) as i32)?;
+                    db_rowid.bind_param(stmt.borrow_mut(), (values.len() + 1) as i32)?;
                     stmt.execute(())?;
                 }
 
@@ -108,7 +105,7 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                 if let Some((db_rowid, partition_name)) = rowid_mapper.get(&id) {
                     let sql = delete(partition_name);
                     let mut stmt = self.connection.prepare(&sql)?;
-                    db_rowid.clone().bind_param(stmt.borrow_mut(), 1)?;
+                    db_rowid.bind_param(stmt.borrow_mut(), 1)?;
                     stmt.execute(())?;
                 }
 
@@ -120,7 +117,7 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
 impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
     /// Auxiliary type used by this virtual table, specifically for row ID mapping. This type will
     /// be initialized by the sqlite3 engine.
-    type Aux = RwLock<HashMap<i64, (Value, String)>>; //internal rowid. rowid from table, table name
+    type Aux = RwLock<HashMap<i64, (i64, String)>>; //internal rowid. rowid from table, table name
     /// The cursor type used for iterating over partition data.
     type Cursor = RangePartitionCursor<'vtab>;
     /// Connects to the virtual table, initializing it with necessary arguments.
@@ -142,7 +139,6 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
         };
         let connection = db;
 
-        println!("{:#?}", p.create_table_query().to_string());
         Ok((
             p.create_table_query().to_string(),
             PartitionMetaTable {
@@ -166,8 +162,6 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
     /// as where clauses to apply to the actual partition tables.
 
     fn best_index(&self, index_info: &mut sqlite3_ext::vtab::IndexInfo) -> ExtResult<()> {
-        println!("best index");
-
         let mut argv_index = 0;
         for mut constraint in index_info.constraints() {
             if constraint.usable() {
@@ -186,6 +180,7 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
                 .filter(|clause| clause.get_name() == self.interface.partition_column_name())
                 .collect::<Vec<&WhereClause>>()
         });
+
         let lookup_where_clause = match partition_column_constraints {
             Some(constraints) => constraints
                 .iter()
