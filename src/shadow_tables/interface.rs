@@ -93,21 +93,6 @@ impl<'vtab> VirtualTable<'vtab> {
         format!("{}_{}", self.base_name, suffix)
     }
 
-    // fn prepare_copy_template<'a>(
-    //     &'a self,
-    //     new_table_name: &'a str,
-    //     db: &'a Connection,
-    // ) -> impl Fn() -> sqlite3_ext::Result<&'a str> + 'a {
-    //     let sql = self.copy_query(new_table_name);
-    //     move || {
-    //         let result = db.execute(&sql, ());
-    //         match result {
-    //             Ok(_) => Ok(new_table_name),
-    //             Err(err) => Err(err),
-    //         }
-    //     }
-    // }
-    /// Create table query from the template table.
     pub fn create_table_query(&self) -> String {
         self.template_table.schema().table_query().clone()
     }
@@ -138,18 +123,3 @@ impl<'vtab> VirtualTable<'vtab> {
         stmt.insert(())
     }
 }
-
-// #[test]
-// fn test_db_copy() {
-//     let conn = match Connection::open_in_memory() {
-//         Ok(conn) => conn,
-//         Err(err) => panic!("{}", err.to_string()),
-//     };
-//     let conn = Connection::from_rusqlite(&conn);
-//     let (name, columns) = mock_template();
-//     let table = TemplateTable::create(conn, &name, columns).unwrap();
-//
-//     let copy_result = table.copy("10000", conn).unwrap();
-//
-//     assert_eq!(copy_result, "test_10000");
-// }

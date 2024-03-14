@@ -11,7 +11,7 @@ pub use root_table::*;
 use sqlite3_ext::ValueType;
 pub use template_table::*;
 
-use crate::{ColumnDeclaration, ColumnDeclarations};
+use crate::{error::TableError, ColumnDeclaration, ColumnDeclarations};
 
 pub enum PartitionValue {
     Interval,
@@ -20,24 +20,31 @@ pub enum PartitionValue {
 impl From<PartitionValue> for ValueType {
     fn from(value: PartitionValue) -> ValueType {
         match value {
-            PartitionValue::Interval => ValueType::Integer,
+            PartitionValue::Interval => ValueType::Text,
         }
     }
 }
-impl From<&'static PartitionValue> for &'static ValueType {
-    fn from(value: &'static PartitionValue) -> &'static ValueType {
+impl<'a> From<&'a PartitionValue> for &'a ValueType {
+    fn from(value: &'a PartitionValue) -> &'a ValueType {
         match value {
-            PartitionValue::Interval => &ValueType::Integer,
+            PartitionValue::Interval => &ValueType::Text,
         }
     }
 }
-impl Into<&'static ValueType> for PartitionValue {
-    fn into(self) -> &'static ValueType {
-        match self {
-            PartitionValue::Interval => &ValueType::Integer,
+
+impl<'a> TryFrom<&'a ValueType> for PartitionValue {
+    type Error = TableError;
+    fn try_from(value: &'a ValueType) -> Result<Self, Self::Error> {
+        match value {
+            ValueType::Text => Ok(PartitionValue::Interval),
+            _ => Err(TableError::PartitionColumn(format!(
+                "Supported types for partition column: {:#?}",
+                "timestamp"
+            ))),
         }
     }
 }
+
 pub trait PartitionType {
     const PARTITION_VALUE_COLUMN_TYPE: &'static PartitionValue;
     const PARTITION_VALUE_COLUMN: &'static str;

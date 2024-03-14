@@ -67,7 +67,7 @@ pub trait Copy: Table {
     }
 }
 pub trait Create: Table {
-    fn schema<'table>(
+    fn schema(
         db: &Connection,
         name: String,
         column_declarations: ColumnDeclarations,

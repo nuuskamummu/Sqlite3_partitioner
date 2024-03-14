@@ -1,11 +1,13 @@
+use std::ops::Deref;
+
 use crate::error::TableError;
 use crate::shadow_tables::interface::VirtualTable;
+use crate::shadow_tables::PartitionValue;
 use crate::utils::parse_interval;
 use crate::ColumnDeclaration;
 use crate::ColumnDeclarations;
 use crate::PartitionColumn;
 use sqlite3_ext::Connection;
-use sqlite3_ext::ValueType;
 extern crate sqlite3_ext;
 
 pub fn connect_to_virtual_table<'a>(
@@ -36,12 +38,7 @@ pub fn create_virtual_table<'a>(
         }?
         .clone();
 
-    match partition_column.data_type() {
-        ValueType::Integer => Ok(()),
-        _ => Err(sqlite3_ext::Error::Module(
-            "Incorrect data type for partition column. Expected Interval.".to_string(),
-        )),
-    }?;
+    PartitionValue::try_from(partition_column.data_type())?;
 
     Ok(VirtualTable::create(
         db,

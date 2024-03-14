@@ -30,10 +30,11 @@ pub fn value_type_to_string(value_type: &ValueType) -> &'static str {
 /// Converts a [str] to a [`sqlite3_ext::ValueType`]
 pub fn parse_value_type(sqlite_type: &str) -> Result<ValueType, TableError> {
     match &sqlite_type.to_uppercase()[..] {
-        "INT" | "INTEGER" | "TIMESTAMP" => Ok(ValueType::Integer),
-        "TEXT" | "VARCHAR" => Ok(ValueType::Text),
+        "INT" | "INTEGER"  => Ok(ValueType::Integer),
+        "TEXT" | "VARCHAR" | "TIMESTAMP" => Ok(ValueType::Text),
         "FLOAT" => Ok(ValueType::Float),
         "BLOB" | "JSON" => Ok(ValueType::Blob),
+        "NULL" => Ok(ValueType::Null),
         _ => Err(TableError::ParseValueType(format!(
             "Cannot parse input type :'{}'",
             sqlite_type
@@ -307,7 +308,7 @@ fn update_bound(
             range.0 = more_restrictive_bound(range.0, bound);
             range.1 = more_restrictive_bound(range.1, bound);
         }
-        _ => {} // Handle other operators if necessary
+        _ => {} 
     }
 }
 fn initial_bound(operator: &ConstraintOp, value: i64, interval: i64) -> (Bound<i64>, Bound<i64>) {
