@@ -9,6 +9,7 @@ use sqlite3_ext::{vtab::ConstraintOp, Value};
 pub use self::column_declaration::{ColumnDeclaration, ColumnDeclarations, PartitionColumn};
 
 mod column_declaration;
+pub mod constraints;
 
 pub struct CreateTableArgs {
     pub table_name: String,

@@ -1,7 +1,7 @@
 use sqlite3_ext::query::{QueryResult, Statement, ToParam};
 use sqlite3_ext::{Connection, FallibleIteratorMut};
 
-use crate::utils::Conditions;
+use crate::constraints::Conditions;
 use crate::ConstraintOpDef;
 #[derive(Debug)]
 pub struct Partition {

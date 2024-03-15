@@ -2,19 +2,17 @@ use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use crate::constraints::WhereClause;
+use crate::operations::{delete::delete, insert::insert, update::update};
 use crate::shadow_tables::interface::VirtualTable;
 use crate::vtab_interface::vtab_cursor::*;
-use crate::{
-    operations::{delete::delete, insert::insert, update::update},
-    vtab_interface::WhereClause,
-};
 use sqlite3_ext::query::ToParam;
+use sqlite3_ext::FromValue;
 use sqlite3_ext::{sqlite3_ext_vtab, vtab::VTab};
 use sqlite3_ext::{
     vtab::{ChangeInfo, ChangeType, CreateVTab, UpdateVTab, VTabConnection},
     Connection, Result as ExtResult,
 };
-use sqlite3_ext::{FromValue, Value};
 
 use super::{connect_to_virtual_table, construct_where_clause, create_virtual_table};
 /// Represents a metadata table for managing partitions in a SQLite database.
@@ -185,17 +183,15 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
             Some(constraints) => constraints
                 .iter()
                 .map(|constraint| {
-                    let wherec = WhereClause {
-                        column_name: self
-                            .interface
+                    Some(WhereClause::new(
+                        self.interface
                             .lookup()
                             .partition_value_column()
                             .get_name()
                             .to_owned(),
-                        operator: constraint.operator,
-                        constraint_index: constraint.constraint_index,
-                    };
-                    Some(wherec)
+                        constraint.get_operator().to_owned(),
+                        constraint.get_constraint_index(),
+                    ))
                 })
                 .collect::<Option<Vec<WhereClause>>>(),
             None => None,

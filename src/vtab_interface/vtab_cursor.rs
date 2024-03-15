@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use std::ops::{Bound, Deref, Index};
 use std::usize;
 
-use super::{PartitionMetaTable, WhereClauses};
+use super::PartitionMetaTable;
+use crate::constraints::{Conditions, WhereClauses};
 use crate::shadow_tables::Partition;
-use crate::utils::{aggregate_conditions_to_ranges, Conditions};
+use crate::utils::aggregate_conditions_to_ranges;
 use sqlite3_ext::query::QueryResult;
 use sqlite3_ext::vtab::ColumnContext;
 use sqlite3_ext::{vtab::VTabCursor, ValueRef};
