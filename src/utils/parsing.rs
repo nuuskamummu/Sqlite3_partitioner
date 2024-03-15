@@ -8,12 +8,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use regex::Regex;
 use sqlite3_ext::{ffi::SQLITE_FORMAT, vtab::ConstraintOp, FromValue, Value, ValueRef, ValueType};
 
-use crate::{
-    constraints::Condition,
-    error::TableError,
-    types::{ColumnDeclaration, CreateTableArgs},
-    PartitionColumn,
-};
+use crate::{constraints::Condition, error::TableError};
 
 pub fn parse_partition_value(value: &ValueRef, interval: i64) -> sqlite3_ext::Result<i64> {
     parse_to_unix_epoch(value).map(|epoch| epoch - epoch % interval)
@@ -160,89 +155,6 @@ pub fn parse_interval(interval_str: &str) -> Result<i64, TableError> {
     Ok(numeric_value * size_in_seconds)
 }
 
-/// Parses arguments for creating a table into a structured format, encapsulated in the `CreateTableArgs` structure.
-///
-/// # Parameters
-/// - `args`: An array of string slices where the first three elements represent the module, database name, and table name, respectively,
-/// and the subsequent elements represent column declarations.
-///
-/// # Returns
-/// - `Result<CreateTableArgs, String>`: On success, returns a `CreateTableArgs` structure containing the table name and a vector of column declarations.
-/// On failure, returns a `String` describing the error.
-///
-/// # Example Usage
-/// ```
-/// // Example of args: ["module_name", "database_name", "table_name", "column1 TYPE", "column2 TYPE"]
-/// let args = vec!["module", "db_name", "table_name", "id INT", "name VARCHAR"];
-/// let create_table_args = parse_create_table_args(&args);
-/// ```
-pub fn parse_create_table_args(args: &[&str]) -> Result<CreateTableArgs, TableError> {
-    let _module = args[0];
-    let _database_name = args[1];
-    let table_name = args[2];
-    let column_args = args[3..].to_vec();
-    let columns: Result<Vec<ColumnDeclaration>, TableError> = column_args
-        .iter()
-        .map(|&column_arg| ColumnDeclaration::try_from(column_arg))
-        .collect();
-    let columns = columns?;
-    let partition_columns: Vec<ColumnDeclaration> = columns
-        .iter()
-        .filter_map(|col| PartitionColumn::from(col).column_def().clone())
-        .collect();
-
-    if partition_columns.len() > 1 {
-        Err(TableError::PartitionColumn(format!(
-            "Only one partition column is allowed. Counted: {:#?}",
-            partition_columns.len()
-        )))
-    } else if partition_columns.is_empty() {
-        Err(TableError::PartitionColumn(
-            "No partition column detected".to_string(),
-        ))
-    } else {
-        let partition_column = partition_columns[0].clone();
-        Ok(CreateTableArgs {
-            table_name: table_name.to_string(),
-            columns,
-            partition_column,
-        })
-    }
-}
-/// Extracts pairs of column names and their associated operators from a given input string.
-///
-/// The input string should contain pairs separated by ", " with each pair consisting of a column name followed by a whitespace and then an operator.
-///
-/// # Parameters
-/// - `input`: A string slice containing the column-operator pairs, separated by ", ".
-///
-/// # Returns
-/// - `Vec<(&str, &str)>`: A vector of tuples, each containing a column name and an operator extracted from the input string.
-///
-/// # Example Usage
-/// ```
-/// let input = "column1 =, column2 >";
-/// let pairs = extract_column_operator_pairs(input);
-/// // pairs would contain [("column1", "="), ("column2", ">")]
-/// ```
-pub fn extract_column_operator_pairs(input: &str) -> Vec<(&str, &str)> {
-    // Split the input string into pairs of "COLUMN OPERATOR"
-    let pairs = input.split(", ");
-
-    // Map each pair into a tuple of (column, operator)
-    let mut result = Vec::new();
-    for pair in pairs {
-        let parts: Vec<&str> = pair.split_whitespace().collect();
-        if parts.len() == 2 {
-            result.push((parts[0], parts[1]));
-        } else {
-            // Handle error or unexpected format
-            println!("Unexpected format for pair: {}", pair);
-        }
-    }
-
-    result
-}
 use std::ops::Bound::{self, *};
 
 //

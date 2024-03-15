@@ -1,5 +1,3 @@
-use std::ops::Deref;
-
 use crate::error::TableError;
 use crate::shadow_tables::interface::VirtualTable;
 use crate::shadow_tables::PartitionValue;

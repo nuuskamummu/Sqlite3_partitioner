@@ -11,11 +11,6 @@ pub use self::column_declaration::{ColumnDeclaration, ColumnDeclarations, Partit
 mod column_declaration;
 pub mod constraints;
 
-pub struct CreateTableArgs {
-    pub table_name: String,
-    pub columns: Vec<ColumnDeclaration>,
-    pub partition_column: ColumnDeclaration,
-}
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone, Copy)]
 #[serde(remote = "ConstraintOp")]
 pub enum ConstraintOpDef {
