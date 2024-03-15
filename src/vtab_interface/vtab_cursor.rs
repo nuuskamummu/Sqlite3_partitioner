@@ -1,13 +1,12 @@
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
-use std::ops::{Bound, Index};
+use std::ops::{Bound, Deref, Index};
 use std::usize;
 
-use super::{PartitionMetaTable, WhereClause, WhereClauses};
+use super::{PartitionMetaTable, WhereClauses};
 use crate::shadow_tables::Partition;
-use crate::utils::{aggregate_conditions_to_ranges, Condition};
-use crate::ConstraintOpDef;
-use sqlite3_ext::query::{QueryResult, Statement, ToParam};
+use crate::utils::{aggregate_conditions_to_ranges, Conditions};
+use sqlite3_ext::query::QueryResult;
 use sqlite3_ext::vtab::ColumnContext;
 use sqlite3_ext::{vtab::VTabCursor, ValueRef};
 use sqlite3_ext::{FromValue, Result as ExtResult};
@@ -109,104 +108,40 @@ impl<'vtab> RangePartitionCursor<'vtab> {
             upper_bound,
         )
     }
-    /// Executes a SQL query against a specified partition and collects the results.
-    ///
-    /// This function prepares and executes a SQL query for the given partition, collecting
-    /// each row's data into `ResultRow` objects. It constructs `ResultRow` instances by
-    /// aggregating `ResultColumn` data for each row returned by the query.
-    ///
-    /// # Parameters
-    ///
-    /// * `partition_name` - The name of the partition to query.
-    /// * `partition_where_str` - The WHERE clause string to apply to the query, filtering the results.
-    /// * `args` - A mutable slice of `ValueRef`, representing bound parameters for the query.
-    ///
-    /// # Returns
-    ///
-    /// An `ExtResult<Vec<ResultRow>>` which is:
-    /// - `Ok(vec)` on success, containing a vector of `ResultRow` objects representing the query results.
-    /// - `Err(e)` on failure, indicating an error occurred during query execution or result processing.
-    fn prepare_partition<'b>(
-        &self,
-        partition_name: &'b str,
-        partition_conditions: &'b [Condition],
-    ) -> ExtResult<Partition> {
-        let mut stmt = self.prepare_statement(partition_name, partition_conditions)?;
 
-        for (index, condition) in partition_conditions.iter().enumerate() {
-            condition.value.bind_param(&mut stmt, (index + 1) as i32)?;
-        }
-        let partition: Partition = (partition_name.to_owned(), stmt).into();
-        Ok(partition)
-    }
-    fn prepare_statement<'a>(
-        &self,
-        partition_name: &'a str,
-        partition_conditions: &'a [Condition],
-    ) -> ExtResult<Statement> {
-        let mut where_clause = partition_conditions
-            .iter()
-            .map(|condition| {
-                format!(
-                    "{} {} {}",
-                    condition.column,
-                    ConstraintOpDef::from(*condition.operator),
-                    "?"
-                )
-            })
-            .collect::<Vec<String>>()
-            .join(" AND ");
-        if !where_clause.is_empty() {
-            where_clause = format!("WHERE {}", where_clause);
-        }
-        let sql = format!(
-            "SELECT rowid as row_id, * FROM {} {}",
-            partition_name, where_clause
-        );
-        self.meta_table.connection.prepare(&sql)
-    }
-
-    /// Queries partitions based on specified WHERE clause conditions and populates the cursor state.
-    ///
-    /// This method orchestrates the process of querying partitions within specified value ranges,
-    /// executing partition-specific queries, and collecting the results. It updates the cursor's
-    /// internal state to include the results from all queried partitions, readying it for row iteration.
-    ///
-    /// The function aggregates conditions into value ranges, identifies relevant partitions,
-    /// executes queries against those partitions, and finally aggregates the results into the
-    /// cursor's state.
-    ///
-    /// # Parameters
-    ///
-    /// * `partition_where_str` - A string representing the WHERE clause for partition queries.
-    /// * `lookup_conditions` - A vector of `Condition` objects representing the conditions to apply to the lookup.
-    /// * `args` - A mutable slice of `ValueRef`, representing bound parameters for the query.
-    ///
-    /// # Returns
-    ///
-    /// A `Result<(), Error>` indicating the success or failure of the operation. On success, the cursor's
-    /// internal state is updated with the query results. On failure, an error is returned detailing the issue.
     fn initialize_partitions<'b>(
         &mut self,
-        partition_conditions: &'b [Condition],
-        lookup_conditions: &'b [Condition],
+        partition_conditions: Option<&'b Conditions<'b>>,
+        lookup_conditions: Option<&'b Conditions<'b>>,
     ) -> ExtResult<std::vec::IntoIter<Partition>> {
-        let ranges = aggregate_conditions_to_ranges(
-            lookup_conditions,
-            self.meta_table.interface.partition_interval(),
-        );
+        let ranges = lookup_conditions
+            .zip(Some(self.meta_table.interface.partition_interval()))
+            .map(|(conditions, interval)| {
+                aggregate_conditions_to_ranges(conditions.as_slice(), interval)
+            })
+            .unwrap_or_default();
 
         let (lower_bound, upper_bound) = ranges
             .get("partition_value")
             .unwrap_or(&(Bound::Unbounded, Bound::Unbounded));
-        let mut prepared_partitions = Vec::default();
-        for (_partition_value, partition_name) in self
+
+        let prepared_partitions: ExtResult<Vec<Partition>> = self
             .borrow_mut()
             .get_partitions_to_query(lower_bound, upper_bound)?
-        {
-            let partition = self.prepare_partition(&partition_name, partition_conditions)?;
-            prepared_partitions.push(partition);
-        }
+            .iter()
+            .try_fold(
+                Vec::new(),
+                |mut accumulator, (_partition_value, partition_name)| {
+                    let partition: Partition = Partition::try_from((
+                        self.meta_table.connection,
+                        partition_name.as_str(),
+                        partition_conditions,
+                    ))?;
+                    accumulator.push(partition);
+                    Ok(accumulator)
+                },
+            );
+        let prepared_partitions = prepared_partitions?;
 
         let mut partition_iter = prepared_partitions.into_iter();
         self.current_partition = partition_iter.next();
@@ -242,14 +177,20 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
         let where_clauses_serialized = idx_str.unwrap_or("");
         let where_clauses: WhereClauses =
             ron::from_str(where_clauses_serialized).unwrap_or(WhereClauses(HashMap::default()));
+        let lookup_conditions: Option<Conditions> = where_clauses
+            .get("lookup_table")
+            .map(|where_clauses| Conditions::try_from((where_clauses, args.deref())))
+            .transpose()
+            .map_err(|err| sqlite3_ext::Error::Module(err.to_string()))?;
 
-        let lookup_conditions =
-            parse_conditions(where_clauses.get("lookup_table"), args).unwrap_or_default();
-        let partition_conditions =
-            parse_conditions(where_clauses.get("partition_table"), args).unwrap_or_default();
+        let partition_conditions: Option<Conditions> = where_clauses
+            .get("partition_table")
+            .map(|where_clauses| Conditions::try_from((where_clauses, args.deref())))
+            .transpose()
+            .map_err(|err| sqlite3_ext::Error::Module(err.to_string()))?;
 
         self.prepared_partitions =
-            self.initialize_partitions(&partition_conditions, &lookup_conditions)?;
+            self.initialize_partitions(partition_conditions.as_ref(), lookup_conditions.as_ref())?;
 
         Ok(())
     }
@@ -334,55 +275,5 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
         }
 
         Ok(self.internal_rowid_counter)
-    }
-}
-
-fn parse_conditions<'a>(
-    constraints: Option<&'a Vec<WhereClause>>,
-    args: &'a [&'a mut ValueRef],
-) -> Result<Vec<Condition<'a>>, String> {
-    constraints.map_or(Ok(Vec::default()), |constraints| {
-        constraints
-            .iter()
-            .map(|constraint| {
-                let arg = args.get(constraint.constraint_index as usize);
-                match arg {
-                    Some(value) => Ok(Condition {
-                        operator: constraint.get_operator(),
-                        column: constraint.get_name(),
-                        value,
-                    }),
-                    None => Err(format!(
-                        "Argument not found for constraint index {}",
-                        constraint.constraint_index
-                    )),
-                }
-            })
-            .collect()
-    })
-}
-#[cfg(test)]
-mod tests {
-    use sqlite3_ext::Value;
-
-    use super::*;
-
-    #[test]
-    fn test_partition_result_new_with_empty_rows() {
-        let partition_result = Partition::new(1, "test_partition".to_string(), vec![]);
-        assert!(partition_result.is_none());
-    }
-
-    #[test]
-    fn test_partition_result_new_with_non_empty_rows() {
-        let rows = vec![PartitionRow {
-            rowid: Value::Integer(1),
-            columns: vec![PartitionColumn {
-                _name: "column1".to_string(),
-                value: Value::Integer(42),
-            }],
-        }];
-        let partition_result = Partition::new(1, "test_partition".to_string(), rows);
-        assert!(partition_result.is_some());
     }
 }

@@ -2,6 +2,7 @@ use std::{
     cmp::{max, min},
     collections::HashMap,
     i64,
+    ops::Deref,
 };
 
 use chrono::{NaiveDate, NaiveDateTime};
@@ -30,7 +31,7 @@ pub fn value_type_to_string(value_type: &ValueType) -> &'static str {
 /// Converts a [str] to a [`sqlite3_ext::ValueType`]
 pub fn parse_value_type(sqlite_type: &str) -> Result<ValueType, TableError> {
     match &sqlite_type.to_uppercase()[..] {
-        "INT" | "INTEGER"  => Ok(ValueType::Integer),
+        "INT" | "INTEGER" => Ok(ValueType::Integer),
         "TEXT" | "VARCHAR" | "TIMESTAMP" => Ok(ValueType::Text),
         "FLOAT" => Ok(ValueType::Float),
         "BLOB" | "JSON" => Ok(ValueType::Blob),
@@ -255,6 +256,20 @@ pub struct Condition<'a> {
     pub operator: &'a ConstraintOp,
     pub value: &'a ValueRef,
 }
+pub struct Conditions<'a> {
+    inner: Vec<Condition<'a>>,
+}
+impl<'a> Conditions<'a> {
+    pub fn as_slice(&self) -> &[Condition<'a>] {
+        &self.inner
+    }
+}
+impl<'a> FromIterator<Condition<'a>> for Conditions<'a> {
+    fn from_iter<T: IntoIterator<Item = Condition<'a>>>(iter: T) -> Self {
+        let conditions = iter.into_iter().collect();
+        Self { inner: conditions }
+    }
+}
 
 //
 /// Aggregates conditions into ranges for each column.
@@ -265,11 +280,10 @@ pub struct Condition<'a> {
 /// Returns:
 /// - A HashMap where each key is a column name and its value is a tuple representing the range as lower and upper bounds.
 pub fn aggregate_conditions_to_ranges<'a>(
-    conditions: &'a [Condition],
+    conditions: &'a [Condition<'a>],
     interval: i64,
 ) -> HashMap<&'a str, (Bound<i64>, Bound<i64>)> {
     let mut ranges: HashMap<&'a str, (Bound<i64>, Bound<i64>)> = HashMap::new();
-
     for condition in conditions {
         let partition_start = parse_partition_value(condition.value, interval).unwrap(); //TODO handle
                                                                                          //error
@@ -308,7 +322,7 @@ fn update_bound(
             range.0 = more_restrictive_bound(range.0, bound);
             range.1 = more_restrictive_bound(range.1, bound);
         }
-        _ => {} 
+        _ => {}
     }
 }
 fn initial_bound(operator: &ConstraintOp, value: i64, interval: i64) -> (Bound<i64>, Bound<i64>) {

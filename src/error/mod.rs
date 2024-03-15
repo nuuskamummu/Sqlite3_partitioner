@@ -13,6 +13,7 @@ pub enum TableError {
     SqlError(sqlite3_ext::Error),
     ParseInterval(String),
     PartitionColumn(String),
+    WhereClause(String),
 }
 
 impl Display for TableError {
@@ -42,6 +43,7 @@ impl Into<sqlite3_ext::Error> for TableError {
             Self::ParseValueType(err) => sqlite3_ext::Error::Module(err),
             Self::ParseInterval(err) => sqlite3_ext::Error::Module(err),
             Self::PartitionColumn(err) => sqlite3_ext::Error::Module(err),
+            Self::WhereClause(err) => sqlite3_ext::Error::Module(err),
         }
     }
 }
