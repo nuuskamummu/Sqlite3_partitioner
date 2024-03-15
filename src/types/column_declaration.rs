@@ -20,7 +20,7 @@ impl PartitionColumn {
     pub fn column_def(&self) -> &Option<ColumnDeclaration> {
         &self.0
     }
-    pub fn new(column_declaration: ColumnDeclaration) -> Self {
+    fn new(column_declaration: ColumnDeclaration) -> Self {
         Self(Some(column_declaration))
     }
 }
@@ -128,16 +128,17 @@ impl<'a> FromIterator<&'a &'a str> for ColumnDeclarations {
         Self(columns)
     }
 }
-impl Into<String> for ColumnDeclarations {
-    fn into(self) -> String {
-        self.0
+
+impl From<ColumnDeclarations> for String {
+    fn from(value: ColumnDeclarations) -> Self {
+        value
+            .0
             .into_iter()
             .map::<String, _>(|col| col.to_string())
             .collect::<Vec<String>>()
             .join(", ")
     }
 }
-
 impl Display for ColumnDeclarations {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s: String = self
@@ -157,8 +158,9 @@ impl IntoIterator for ColumnDeclarations {
         self.0.into_iter()
     }
 }
-impl<'a> Into<&'a [ColumnDeclaration]> for &'a ColumnDeclarations {
-    fn into(self) -> &'a [ColumnDeclaration] {
-        &self.0
+
+impl<'a> From<&'a ColumnDeclarations> for &'a [ColumnDeclaration] {
+    fn from(value: &'a ColumnDeclarations) -> Self {
+        &value.0
     }
 }

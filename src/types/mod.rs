@@ -1,7 +1,6 @@
 use std::fmt::{self, Display};
 
 pub use crate::utils::parse_value_type;
-use crate::{LookupTable, RootTable, TemplateTable};
 use serde::de::{self, EnumAccess, SeqAccess, VariantAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sqlite3_ext::Blob;
@@ -16,65 +15,6 @@ pub struct CreateTableArgs {
     pub columns: Vec<ColumnDeclaration>,
     pub partition_column: ColumnDeclaration,
 }
-impl CreateTableArgs {}
-pub struct PartitionArgs {
-    pub name: String,
-    pub columns: Vec<String>,
-}
-
-#[derive(Debug)]
-pub struct Partition<T> {
-    pub name: String,
-    pub columns: Vec<ColumnDeclaration>,
-    // pub interval: i64,
-    pub root: RootTable,
-    pub lookup: LookupTable<T>,
-    pub template: TemplateTable,
-}
-
-pub enum PartitionDef {
-    RangePartition(Partition<i64>),
-}
-pub trait PartitionAccessor<T> {
-    fn get_template(&self) -> &TemplateTable;
-    fn get_root(&self) -> &RootTable;
-    fn get_lookup(&self) -> &LookupTable<T>;
-    fn new(
-        name: &str,
-        columns: Vec<ColumnDeclaration>,
-        root: RootTable,
-        lookup: LookupTable<T>,
-        template: TemplateTable,
-    ) -> Self;
-}
-
-impl<T> PartitionAccessor<T> for Partition<T> {
-    fn get_root(&self) -> &RootTable {
-        &self.root
-    }
-    fn get_lookup(&self) -> &LookupTable<T> {
-        &self.lookup
-    }
-    fn get_template(&self) -> &TemplateTable {
-        &self.template
-    }
-    fn new(
-        name: &str,
-        columns: Vec<ColumnDeclaration>,
-        root: RootTable,
-        lookup: LookupTable<T>,
-        template: TemplateTable,
-    ) -> Self {
-        Self {
-            name: name.to_string(),
-            columns,
-            root,
-            lookup,
-            template,
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone, Copy)]
 #[serde(remote = "ConstraintOp")]
 pub enum ConstraintOpDef {
@@ -241,17 +181,6 @@ impl From<ValueDef> for Value {
             ValueDef::Null => Value::Null,
         }
     }
-}
-
-pub fn option_value_to_option_serializable_value(option_value: Option<Value>) -> Option<ValueDef> {
-    option_value.map(|value| value.into())
-}
-
-// Convert Option<SerializableValue> to Option<Value>
-pub fn option_serializable_value_to_option_value(
-    option_serializable_value: Option<ValueDef>,
-) -> Option<Value> {
-    option_serializable_value.map(|serializable_value| serializable_value.into())
 }
 
 impl Display for ConstraintOpDef {
