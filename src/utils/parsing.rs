@@ -10,10 +10,24 @@ use sqlite3_ext::{ffi::SQLITE_FORMAT, vtab::ConstraintOp, FromValue, Value, Valu
 
 use crate::{constraints::Condition, error::TableError};
 
+/// Parses a `ValueRef` and adjusts it to the nearest lower interval boundary based on the provided interval.
+///
+/// Parameters:
+/// - `value`: The value to be parsed and adjusted.
+/// - `interval`: The interval by which to adjust the value.
+///
+/// Returns:
+/// - A result containing the adjusted UNIX epoch time or an error if the value cannot be parsed
 pub fn parse_partition_value(value: &ValueRef, interval: i64) -> sqlite3_ext::Result<i64> {
     parse_to_unix_epoch(value).map(|epoch| epoch - epoch % interval)
 }
-/// Converts a [`sqlite3_ext::ValueType`] to a [&`str`]
+/// Converts a [`ValueType`] enum to a string representation.
+///
+/// Parameters:
+/// - `value_type`: The value type to convert.
+///
+/// Returns:
+/// - A string slice representing the data type.
 pub fn value_type_to_string(value_type: &ValueType) -> &'static str {
     match value_type {
         ValueType::Integer => "INTEGER",
@@ -23,7 +37,13 @@ pub fn value_type_to_string(value_type: &ValueType) -> &'static str {
         ValueType::Float => "FLOAT",
     }
 }
-/// Converts a [str] to a [`sqlite3_ext::ValueType`]
+/// Converts a string representation of a SQLite data type to its [`ValueType`] enum.
+///
+/// Parameters:
+/// - `sqlite_type`: The string representation of the SQLite data type.
+///
+/// Returns:
+/// - A result containing the corresponding `ValueType` enum or a `TableError` if the type cannot be parsed.
 pub fn parse_value_type(sqlite_type: &str) -> Result<ValueType, TableError> {
     match &sqlite_type.to_uppercase()[..] {
         "INT" | "INTEGER" => Ok(ValueType::Integer),
@@ -59,6 +79,13 @@ static DATETIME_FORMATS: &[&str] = &[
                            // Add more formats as needed
 ];
 
+/// Attempts to parse a datetime string into a UNIX epoch time.
+///
+/// Parameters:
+/// - `value`: The `Value` instance containing a datetime string.
+///
+/// Returns:
+/// - A result containing the parsed UNIX epoch time or an error if parsing fails.
 pub fn parse_datetime_from_value(value: Value) -> sqlite3_ext::Result<i64> {
     match value {
         Value::Text(value) => parse_datetime_to_epoch(value.trim()),
@@ -72,6 +99,13 @@ pub fn parse_datetime_from_value(value: Value) -> sqlite3_ext::Result<i64> {
     }
 }
 
+/// Parses a datetime string to a UNIX epoch time, trying multiple known formats.
+///
+/// Parameters:
+/// - `datetime_str`: The datetime string to parse.
+///
+/// Returns:
+/// - A result containing the UNIX epoch time or an error if all parsing attempts fail.
 fn parse_datetime_to_epoch(datetime_str: &str) -> sqlite3_ext::Result<i64> {
     for &format in DATETIME_FORMATS.iter() {
         let trimmed_format = format.trim();
@@ -97,8 +131,26 @@ fn parse_datetime_to_epoch(datetime_str: &str) -> sqlite3_ext::Result<i64> {
     ))
 }
 
-/// Parses an incoming [sqlite3_ext::ValueType] to UNIX epoch.
-// TODO improve!
+/// Converts a given `ValueRef` to a UNIX epoch timestamp (seconds since the UNIX epoch).
+///
+/// This function supports several `ValueType`s, converting them appropriately to ensure
+/// consistent handling of datetime values across different data representations. The conversion
+/// logic includes:
+/// - `Integer`: Directly returned as the UNIX epoch timestamp.
+/// - `Float`: Cast to `i64`, assuming rounding is acceptable for the use case.
+/// - `Text`: Attempted parsing as a datetime string to UNIX epoch. Supports multiple datetime formats.
+/// - `Blob` and `Null`: These types are considered incompatible with UNIX epoch timestamps, resulting in an error.
+///
+/// Parameters:
+/// - `value`: A reference to the `ValueRef` representing the data to be converted.
+///
+/// Returns:
+/// - On success, an `Ok(i64)` containing the UNIX epoch timestamp.
+/// - On failure, particularly for `Blob` and `Null` types or if text parsing fails, returns
+///   an `Error` indicating the inability to parse the value as a UNIX epoch timestamp.
+///
+/// Note: The handling of `Float` values involves casting to `i64`, which may not be suitable
+/// for all use cases. Consider the desired behavior for your application when using this function.
 pub fn parse_to_unix_epoch(value: &ValueRef) -> sqlite3_ext::Result<i64> {
     match value.value_type() {
         ValueType::Integer => Ok(value.get_i64()),
@@ -110,9 +162,13 @@ pub fn parse_to_unix_epoch(value: &ValueRef) -> sqlite3_ext::Result<i64> {
         )),
     }
 }
-/// Accepts a str with the format ["Numeric part Unit part"] where unit part is either [Hour] or
-/// [Minute]. The result is a i64 representation of the interval in seconds.
-// TODO better documentation, handle more cases.
+/// Parses a textual representation of a datetime interval to its duration in seconds.
+///
+/// Parameters:
+/// - `interval_str`: The interval string to parse, e.g., "1 hour".
+///
+/// Returns:
+/// - A result containing the interval in seconds or a `TableError` if parsing fails.
 pub fn parse_interval(interval_str: &str) -> Result<i64, TableError> {
     // Initialize the Regex pattern
     let re = Regex::new(r"(\d+)\s+(\w+)")
@@ -157,14 +213,14 @@ pub fn parse_interval(interval_str: &str) -> Result<i64, TableError> {
 
 use std::ops::Bound::{self, *};
 
-//
-/// Aggregates conditions into ranges for each column.
+/// Aggregates a list of conditions into column-wise ranges, represented as lower and upper bounds.
 ///
 /// Parameters:
-/// - `conditions`: A vector of conditions to be aggregated into ranges.
+/// - `conditions`: A slice of conditions to aggregate.
+/// - `interval`: The interval by which the conditions should be adjusted.
 ///
 /// Returns:
-/// - A HashMap where each key is a column name and its value is a tuple representing the range as lower and upper bounds.
+/// - A `HashMap` where each key is a column name and its value is a tuple representing the column's value range.
 pub fn aggregate_conditions_to_ranges<'a>(
     conditions: &'a [Condition<'a>],
     interval: i64,
@@ -184,6 +240,21 @@ pub fn aggregate_conditions_to_ranges<'a>(
 
     ranges
 }
+
+/// Updates the range boundaries based on the provided operator and value.
+///
+/// This function adjusts the lower or upper bounds of a range tuple to reflect the
+/// constraints imposed by a SQL condition. It uses `less_restrictive_bound` or
+/// `more_restrictive_bound` functions to ensure the updated range accurately
+/// represents the condition's intent.
+///
+/// Parameters:
+/// - `range`: A mutable reference to a tuple representing the current range (lower and upper bounds).
+/// - `operator`: The SQL comparison operator from the condition.
+/// - `value`: The comparison value from the condition.
+/// - `interval`: The interval for adjusting the range, used with certain operators to define the range more accurately.
+///
+/// No return value, but modifies the input range in place.
 fn update_bound(
     range: &mut (Bound<i64>, Bound<i64>),
     operator: &ConstraintOp,
@@ -211,6 +282,20 @@ fn update_bound(
         _ => {}
     }
 }
+
+/// Calculates the initial range boundaries based on a given operator, value, and interval.
+///
+/// This function determines the starting lower and upper bounds for a range, based on the
+/// specified operator and value. It is particularly useful for initializing the bounds
+/// before refining them with further conditions.
+///
+/// Parameters:
+/// - `operator`: The SQL comparison operator from the condition, dictating how the initial bounds are set.
+/// - `value`: The comparison value for the condition, used to establish the initial bounds.
+/// - `interval`: The interval for adjusting the range with certain operators, aiding in defining the initial range.
+///
+/// Returns:
+/// - A tuple representing the initial range (lower and upper bounds) based on the operator and value.
 fn initial_bound(operator: &ConstraintOp, value: i64, interval: i64) -> (Bound<i64>, Bound<i64>) {
     match operator {
         ConstraintOp::GT | ConstraintOp::GE => (Excluded(value), Unbounded),
@@ -220,7 +305,14 @@ fn initial_bound(operator: &ConstraintOp, value: i64, interval: i64) -> (Bound<i
         _ => (Unbounded, Unbounded), // Default case
     }
 }
-// Choose the less restrictive (i.e., broader) lower bound
+/// Chooses the less restrictive (broader) of two bounds.
+///
+/// Parameters:
+/// - `a`: The first bound to compare.
+/// - `b`: The second bound to compare.
+///
+/// Returns:
+/// - The less restrictive bound.
 fn less_restrictive_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
     match (a, b) {
         (Unbounded, _) | (_, Unbounded) => Unbounded,
@@ -236,7 +328,14 @@ fn less_restrictive_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
     }
 }
 
-// Keep the existing logic for more restrictive bounds as it correctly narrows down the range
+/// Chooses the more restrictive (narrower) of two bounds.
+///
+/// Parameters:
+/// - `a`: The first bound to compare.
+/// - `b`: The second bound to compare.
+///
+/// Returns:
+/// - The more restrictive bound.
 fn more_restrictive_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
     match (a, b) {
         (Unbounded, _) => b,

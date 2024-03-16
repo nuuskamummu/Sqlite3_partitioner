@@ -16,6 +16,16 @@ use std::{collections::HashMap, sync::RwLock};
 
 use crate::utils::parse_partition_value;
 
+/// Initializes the database with the Partitioner module.
+///
+/// This function sets up the virtual table module "Partitioner" in the SQLite database
+/// to manage partitioned tables. It leverages a global lock for thread safety.
+///
+/// Parameters:
+/// - `db`: Reference to the active database connection.
+///
+/// Returns:
+/// - `ExtResult<()>`: Ok if successful, or an error on failure.
 #[sqlite3_ext_main]
 fn init(db: &Connection) -> ExtResult<()> {
     db.create_module(
@@ -26,6 +36,17 @@ fn init(db: &Connection) -> ExtResult<()> {
     Ok(())
 }
 
+/// Constructs `WhereClauses` from the provided index information and virtual table.
+///
+/// This function parses the index information to generate SQL WHERE clauses that are
+/// applicable for querying the virtual table, based on its column constraints and indexes.
+///
+/// Parameters:
+/// - `index_info`: Index information provided by the SQLite VTAB method bestIndex.
+/// - `virtual_table`: Reference to the `VirtualTable`.
+///
+/// Returns:
+/// - A result containing `WhereClauses` if successful, or an error on failure.
 fn construct_where_clause(
     index_info: &sqlite3_ext::vtab::IndexInfo,
     virtual_table: &VirtualTable,

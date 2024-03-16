@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{self, Display, Formatter};
 
 use sqlite3_ext::ffi::SQLITE_MISMATCH;
 
@@ -17,8 +17,18 @@ pub enum TableError {
 }
 
 impl Display for TableError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{}", self.to_string()))
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            TableError::ColumnTypeMismatch { expected, found } => {
+                write!(f, "Expected column type {}, but found {}", expected, found)
+            }
+            TableError::ColumnDeclaration(msg) => write!(f, "Column declaration error: {}", msg),
+            TableError::ParseValueType(msg) => write!(f, "Parse value type error: {}", msg),
+            TableError::SqlError(err) => write!(f, "SQL error: {}", err),
+            TableError::ParseInterval(msg) => write!(f, "Parse interval error: {}", msg),
+            TableError::PartitionColumn(msg) => write!(f, "Partition column error: {}", msg),
+            TableError::WhereClause(msg) => write!(f, "Where clause error: {}", msg),
+        }
     }
 }
 impl From<TableError> for String {

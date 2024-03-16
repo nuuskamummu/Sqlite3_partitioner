@@ -12,14 +12,22 @@ use sqlite3_ext::vtab::ColumnContext;
 use sqlite3_ext::{vtab::VTabCursor, ValueRef};
 use sqlite3_ext::{FromValue, Result as ExtResult};
 
+/// Represents a cursor for iterating over partitioned data in a virtual table.
+///
+/// The cursor maintains internal state to track the current partition and row, allowing
+/// for seamless iteration and data retrieval across multiple partitions based on query conditions.
 #[derive(Debug)]
 pub struct RangePartitionCursor<'vtab> {
+    /// Tracks the internal ROWID counter for the cursor's current position.
     pub internal_rowid_counter: i64,
+    /// Reference to the metadata table associated with the partitioned data.
     pub meta_table: &'vtab PartitionMetaTable<'vtab>,
+    /// Iterator over partitions prepared for querying based on the current query conditions.
     pub prepared_partitions: std::vec::IntoIter<Partition>,
+    /// The current partition under iteration by the cursor.
     pub current_partition: Option<Partition>,
+    /// Indicates whether the cursor has reached the end of available data.
     pub eof: bool,
-    pub current_partition_index: usize, // current_partition: Option<&'vtab PartitionResult<'vtab>>,
 }
 impl<'vtab> RangePartitionCursor<'vtab> {
     /// Constructs a new `RangePartitionCursor` for interacting with partitioned data.
@@ -35,13 +43,13 @@ impl<'vtab> RangePartitionCursor<'vtab> {
         Self {
             meta_table,
             internal_rowid_counter: i64::default(),
-            current_partition_index: usize::default(),
             prepared_partitions: std::vec::IntoIter::default(),
             current_partition: None,
             eof: false,
         }
     }
 
+    /// Retrieves a mutable reference to the current partition, if any.
     pub fn get_mut_current_partition(&mut self) -> Option<&mut Partition> {
         self.current_partition.borrow_mut().as_mut()
     }
@@ -60,8 +68,8 @@ impl<'vtab> RangePartitionCursor<'vtab> {
     ///
     /// # Returns
     ///
-    /// An `Option<&mut PartitionResult>` which is:
-    /// - `Some(&mut PartitionResult)` if the next partition exists within the current result set.
+    /// An `Option<&mut Partition>` which is:
+    /// - `Some(&mut Partition)` if the next partition exists within the current result set.
     /// - `None` if there are no more partitions in the current result set.
     fn advance_to_next_partition(&mut self) -> Option<&Partition> {
         self.current_partition = self.prepared_partitions.borrow_mut().next();
@@ -71,8 +79,8 @@ impl<'vtab> RangePartitionCursor<'vtab> {
     ///
     /// # Returns
     ///
-    /// An `Option<&mut ResultRow>` which is:
-    /// - `Some(&mut ResultRow)` if the next row exists within the current partition.
+    /// An `Option<&mut QueryResult>` which is:
+    /// - `Some(&mut QueryResult)` if the next row exists within the current partition.
     /// - `None` if there are no more rows in the current partition.
     fn advance_to_next_row(&mut self) -> ExtResult<Option<&mut QueryResult>> {
         let current_partition = self.get_mut_current_partition();
@@ -110,6 +118,14 @@ impl<'vtab> RangePartitionCursor<'vtab> {
         )
     }
 
+    /// Initializes cursor with partitions matching specified conditions.
+    ///
+    /// # Parameters
+    /// * `partition_conditions` - Optional conditions specific to the partition table.
+    /// * `lookup_conditions` - Optional conditions for looking up partitions.
+    ///
+    /// # Returns
+    /// An iterator over partitions that match the given conditions.
     fn initialize_partitions<'b>(
         &mut self,
         partition_conditions: Option<&'b Conditions<'b>>,
@@ -250,9 +266,7 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
     /// Returns the row ID of the current row.
     ///
     /// # Returns
-    ///
-    /// A `Ok<i64>` containing the row ID of the current row, or an Err
-    /// if the row ID cannot be retrieved.
+    /// The row ID or an error if it cannot be retrieved.
     fn rowid(&self) -> ExtResult<i64> {
         let rowid_column = self.get_current_row().map(|row| row.index(0));
         let partition_name = match self.get_current_partition() {

@@ -10,19 +10,40 @@ use crate::TemplateTable;
 use super::operations::Drop;
 use super::operations::Table;
 
+/// Represents a virtual table with partitioning capabilities in SQLite.
+///
+/// Encapsulates the operations required for managing and interacting with a virtual table,
+/// including connecting to existing tables, creating new tables with specific partitioning
+/// settings, and performing data manipulation operations like insertions and deletions.
 #[derive(Debug)]
 pub struct VirtualTable<'vtab> {
+    /// Reference to the SQLite database connection.
     pub connection: &'vtab Connection,
+    /// Base name of the virtual table.
     base_name: String,
+    /// Associated template table for creating new partitions.
     template_table: TemplateTable,
+    /// Root table containing metadata about partitions.
     root_table: RootTable,
+    /// Lookup table managing the mapping between partition values and partition names.
     lookup_table: LookupTable<i64>,
 }
-/// Defines behavior for managing template tables, including creation, copying, and schema definition.
-///
-/// This trait encapsulates methods required to create template tables, generate creation queries,
-/// copy existing templates, and retrieve table schema information.
+
 impl<'vtab> VirtualTable<'vtab> {
+    /// Connects to an existing virtual table within the database.
+    ///
+    /// This function initializes a `VirtualTable` instance by connecting to the existing components
+    /// of a virtual table, including the root, template, and lookup tables, based on the provided name.
+    /// It enables subsequent operations on the virtual table through the returned `VirtualTable` instance.
+    ///
+    /// # Parameters
+    /// - `db`: A reference to the active database connection.
+    /// - `name`: The name of the virtual table to connect to.
+    ///
+    /// # Returns
+    /// Returns a `VirtualTable` instance if the connection is successful, encapsulating the virtual
+    /// table's operational context. On failure, returns an error indicating the issue encountered
+    /// during the connection process.
     pub fn connect(
         db: &'vtab Connection,
         name: &str,
@@ -37,6 +58,22 @@ impl<'vtab> VirtualTable<'vtab> {
         Ok(table)
     }
 
+    /// Creates a new instance of a virtual table with specified configurations.
+    ///
+    /// Initializes and configures a new virtual table in the database, setting up associated structures
+    /// like the lookup table for partition mapping, the root table for metadata, and a template table
+    /// for defining the structure of partitions. This method facilitates setting up a partitioned virtual
+    /// table environment with custom column definitions and partitioning strategy.
+    ///
+    /// # Parameters
+    /// - `db`: A reference to the active database connection.
+    /// - `name`: The base name for the virtual table and its associated structures.
+    /// - `column_declarations`: Specifications of columns for the virtual table.
+    /// - `partition_column`: The name of the column used to determine partitioning.
+    /// - `interval`: The interval used for partitioning data.
+    ///
+    /// # Returns
+    /// On success, returns an instance of `VirtualTable`. If any part of the setup fails, an error is returned.
     pub fn create(
         db: &'vtab Connection,
         name: &str,
@@ -52,6 +89,14 @@ impl<'vtab> VirtualTable<'vtab> {
             template_table: TemplateTable::create(db, name, column_declarations)?,
         })
     }
+    /// Destroys the virtual table and all its associated data structures.
+    ///
+    /// This method deletes all partitions managed by the virtual table, as well as the lookup, root,
+    /// and template tables. It ensures a clean removal of all database artifacts related to the virtual table.
+    ///
+    /// # Returns
+    /// On successful execution, returns `Ok(())`. If an error occurs during the deletion of any component,
+    /// an error is returned detailing the issue.
     pub fn destroy(&self) -> sqlite3_ext::Result<()> {
         for partition in self.lookup_table.get_partitions_by_range(
             self.connection,
@@ -66,8 +111,18 @@ impl<'vtab> VirtualTable<'vtab> {
         self.template_table.drop_table(self.connection)?;
         Ok(())
     }
-    /// If partition does not already exists, this method will copy the template table, and
-    /// updating lookup table before returning the name for the (newly created) partition
+    /// Retrieves the name of an existing partition or creates a new partition for the given value.
+    ///
+    /// This method looks up the partition associated with the provided `partition_value`. If a
+    /// partition does not exist, it creates a new partition by copying the template table structure,
+    /// updates the lookup table with this new partition's information, and returns the new partition's name.
+    ///
+    /// # Parameters
+    /// * `partition_value` - The value determining which partition to retrieve or create.
+    ///
+    /// # Returns
+    /// The name of the existing or newly created partition as a result. In case of errors during
+    /// lookup, creation, or insertion into the lookup table, an appropriate error is returned.
     pub fn get_partition(&self, partition_value: &i64) -> sqlite3_ext::Result<String> {
         self.lookup_table
             .get_partition(partition_value)
@@ -84,31 +139,79 @@ impl<'vtab> VirtualTable<'vtab> {
                 Some(name) => Ok(name.to_owned()),
             })
     }
+
+    /// Copies the template table structure to create a new partition table with a specified suffix.
+    ///
+    /// # Parameters
+    /// * `suffix` - The suffix to append to the base name for the new partition table.
+    ///
+    /// # Returns
+    /// The name of the newly created partition table.
     fn copy(&self, suffix: &str) -> sqlite3_ext::Result<String> {
         let new_table_name = self.format_new_table_name(suffix);
         self.template_table.copy(&new_table_name, self.connection)?;
         Ok(new_table_name)
     }
+
+    /// Generates a new table name by appending a suffix to the virtual table's base name.
+    ///
+    /// # Parameters
+    /// * `suffix` - The suffix to be appended.
+    ///
+    /// # Returns
+    /// The formatted new table name.
     fn format_new_table_name(&self, suffix: &str) -> String {
         format!("{}_{}", self.base_name, suffix)
     }
 
+    /// Retrieves the SQL query to create a table based on the template table's schema.
+    ///
+    /// # Returns
+    /// The SQL CREATE TABLE query string.
     pub fn create_table_query(&self) -> String {
         self.template_table.schema().table_query().clone()
     }
+
+    /// Accesses the column declarations of the template table.
+    ///
+    /// # Returns
+    /// A reference to the `ColumnDeclarations` of the template table.
     pub fn columns(&self) -> &ColumnDeclarations {
         self.template_table.columns()
     }
+
+    /// Retrieves the name of the partition column from the root table.
+    ///
+    /// # Returns
+    /// The name of the partition column.
     pub fn partition_column_name(&self) -> &str {
         self.root_table.partition_column()
     }
+
+    /// Retrieves the partition interval set in the root table.
+    ///
+    /// # Returns
+    /// The partition interval in seconds.
     pub fn partition_interval(&self) -> i64 {
         self.root_table.get_interval()
     }
+
+    /// Provides a reference to the lookup table associated with the virtual table.
+    ///
+    /// # Returns
+    /// A reference to the `LookupTable`.
     pub fn lookup(&self) -> &LookupTable<i64> {
         &self.lookup_table
     }
 
+    /// Inserts a new row into the appropriate partition based on the specified partition value.
+    ///
+    /// # Parameters
+    /// * `partition_value` - The value determining which partition the new row belongs to.
+    /// * `columns` - An array of references to `ValueRef`, representing the values to be inserted.
+    ///
+    /// # Returns
+    /// The ROWID of the inserted row.
     pub fn insert(&self, partition_value: i64, columns: &[&ValueRef]) -> sqlite3_ext::Result<i64> {
         let partition = self.get_partition(&partition_value)?;
         let placeholders = std::iter::repeat("?")

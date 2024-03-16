@@ -11,60 +11,64 @@ use crate::ColumnDeclaration;
 use super::operations::{Connect, Create, Drop, SchemaDeclaration, Table};
 use super::{PartitionType, PartitionValue};
 
-/// A constant representing the postfix appended to the names of lookup tables.
-
-/// Defines behavior for managing lookup tables, including creation, connection, data insertion,
-/// and retrieval based on partitioning logic.
-///
-/// This trait encapsulates methods required for creating lookup tables, generating SQL queries for
-/// creation and insertion, connecting to existing tables, managing and accessing partition information.
+/// This trait defines the necessary methods for creating the lookup table, generating SQL queries for
+/// creation and insertion, connecting to existing tables, and managing and accessing partition information
 pub trait Lookup<T> {
-    /// Retrieves information about a specific partition based on a bucket value, including whether
+    /// Retrieves information about a specific partition based on a given value, including whether
     /// a new partition needs to be created.
     ///
-    /// # Parameters
+    /// Parameters:
     /// - `db`: A reference to the database connection.
-    /// - `bucket`: The bucket value to lookup.
+    /// - `value`: The value to lookup.
     ///
-    /// # Returns
-    /// - `Result<(String, bool)>`: The name of the partition table and a boolean indicating if it needs to be created.
-    fn get_partition(&self, db: &Connection, bucket: T) -> ExtResult<(String, bool)>;
+    /// Returns:
+    /// - A result containing the name of the partition table and a boolean indicating if it needs to be created.
+
+    fn get_partition(&self, db: &Connection, value: T) -> ExtResult<(String, bool)>;
 
     /// Synchronizes the internal partitions map with the current state of the database.
     ///
-    /// # Parameters
+    /// Parameters:
     /// - `db`: A reference to the database connection.
     ///
-    /// # Returns
-    /// - `Result<()>`: Indicates successful synchronization or provides an error.
+    /// Returns:
+    /// - A result indicating successful synchronization or an error.
     fn sync(&self, db: &Connection) -> ExtResult<()>;
 
     /// Performs a custom synchronization of the partitions map based on a specified condition.
     ///
-    /// # Parameters
+    /// Parameters:
     /// - `db`: A reference to the database connection.
     /// - `where_clause`: A SQL WHERE clause to filter the synchronization process.
     ///
-    /// # Returns
-    /// - `Result<()>`: Indicates successful synchronization or provides an error.
+    /// Returns:
+    /// - A result indicating successful synchronization or an error.
     fn custom_sync(&self, db: &Connection, where_clause: String) -> ExtResult<()>;
 
     /// Retrieves a list of partitions within a specified range of partition values.
     ///
-    /// # Parameters
+    /// Parameters:
     /// - `db`: A reference to the database connection.
-    /// - `include`: The lower bound of the range (inclusive or exclusive).
-    /// - `exclude`: The upper bound of the range (inclusive or exclusive).
+    /// - `from`: The lower bound of the range (inclusive or exclusive).
+    /// - `to`: The upper bound of the range (inclusive or exclusive).
     ///
-    /// # Returns
-    /// - `Result<Vec<(i64, String)>>`: A list of partition values and their corresponding table names within the specified range.
+    /// Returns:
+    /// - A result containing a list of partition values and their corresponding table names within the specified range.
     fn get_partitions_by_range(
         &self,
         db: &Connection,
         from: Bound<T>,
         to: Bound<T>,
     ) -> ExtResult<Vec<(T, String)>>;
-    // fn drop_table_query(&self) -> String;
+
+    /// Parses a partition value from a given `Value` instance and an interval.
+    ///
+    /// Parameters:
+    /// - `value`: A reference to the value to be parsed.
+    /// - `interval`: The interval to apply during parsing.
+    ///
+    /// Returns:
+    /// - A result containing the parsed partition value.
     fn parse_partition_value(value: &Value, interval: T) -> sqlite3_ext::Result<T>;
 }
 
@@ -74,7 +78,6 @@ impl PartitionType for LookupTable<i64> {
     const PARTITION_VALUE_COLUMN_TYPE: &'static PartitionValue = &PartitionValue::Interval;
     const PARTITION_NAME_COLUMN_TYPE: &'static ValueType = &ValueType::Text;
 }
-// type LookUpSchema = Schema;
 impl Table for LookupTable<i64> {
     const POSTFIX: &'static str = "lookup";
     fn schema(&self) -> &SchemaDeclaration {
@@ -96,7 +99,6 @@ impl Connect for LookupTable<i64> {}
 #[derive(Debug)]
 pub struct LookupTable<T> {
     pub(super) schema: SchemaDeclaration,
-    // base_name: String,
     pub partitions: RwLock<BTreeMap<T, String>>,
 }
 impl LookupTable<i64> {
@@ -111,23 +113,29 @@ impl LookupTable<i64> {
         <Self as PartitionType>::partition_value_column()
     }
 
-    /// Creates a new `LookupTable` instance with a specified base name and initial partitions.
+    /// Creates a new instance of `LookupTable` with a specified base name. This involves initializing
+    /// the lookup table's partitions map and setting up the table schema according to the specified
+    /// parameters.
     ///
-    /// This method initializes the lookup table's partitions map with the given partitions and sets the base name.
+    /// The method constructs the table name from the provided base name and prepares the schema for
+    /// the lookup table. It does not populate the partitions map with any partitions; this is expected
+    /// to be done through synchronization.
     ///
     /// # Parameters
-    /// - `name`: The base name of the lookup table.
-    /// - `partitions`: A vector of `PartitionTable` representing the initial partitions.
+    /// - `db`: A reference to the database connection. Used to prepare the schema for the lookup table.
+    /// - `base_name`: The base name for the lookup table. This name is used to derive the full table
+    ///   name and should be unique within the database to avoid conflicts.
     ///
     /// # Returns
-    /// - `Result<Self>`: An instance of `LookupTable`.
+    /// - `Result<Self>`: On successful creation, returns an instance of `LookupTable`. On failure,
+    ///   returns an error encapsulating the issue encountered during the table creation process.
+    ///
+    /// # Errors
+    /// This method may return an error if there are issues creating the schema for the lookup table
+    /// in the database. Errors could arise from invalid table names, issues with the database connection,
+    /// or problems executing the SQL commands to set up the schema. All errors are returned as
+    /// `ExtResult<Self>`, providing details about the failure.
     pub fn create(db: &Connection, base_name: &str) -> ExtResult<Self> {
-        // let partition_tree: RwLock<BTreeMap<i64, String>> = RwLock::new(
-        //     partitions
-        //         .into_iter()
-        //         .map(|partition| (partition.value, partition.name))
-        //         .collect(),
-        // );
         let table_name = Self::format_name(base_name);
         let columns = <Self as PartitionType>::columns();
         let schema = <Self as Create>::schema(db, table_name.to_string(), columns)?;
@@ -165,18 +173,19 @@ impl LookupTable<i64> {
         );
         sql
     }
-    /// Retrieves a partition from the lookup table based on the provided bucket value.
+    /// Retrieves a partition from the lookup table based on the provided value.
     ///
-    /// If the partition does not exist, it attempts to insert a new partition. This method also
-    /// ensures the lookup table is synchronized before fetching the partition.
+    /// This method searches for an existing partition matching the given value. If the partition does not exist, it indicates the need for creating a new partition. The lookup table is synchronized with the database before fetching the partition to ensure the in-memory representation is up-to-date.
     ///
     /// # Parameters
     /// - `db`: A reference to the database connection.
-    /// - `bucket`: The bucket value for which to retrieve the partition.
+    /// - `partition_value`: The value for which to retrieve the partition.
     ///
     /// # Returns
-    /// - `Result<(String, bool)>`: The name of the partition table and a boolean indicating
-    ///   whether the table needs to be created.
+    /// - `Result<Option<String>>`: On success, returns an optional containing the name of the partition table if found. Returns `None` if no matching partition is found. On failure, returns an error.
+    ///
+    /// # Errors
+    /// This method may return an error if there's a problem reading the partitions from the database or if there are issues with database connectivity.
     pub fn get_partition(&self, partition_value: &i64) -> sqlite3_ext::Result<Option<String>> {
         let borrowed_partitions = self.partitions.read().map_err(|err| {
             sqlite3_ext::Error::Sqlite(1, Some(format!("Error reading partitions: {}", err)))
@@ -189,13 +198,16 @@ impl LookupTable<i64> {
 
     /// Synchronizes the in-memory partitions map with the current state of the lookup table in the database.
     ///
-    /// This method ensures that the partitions map reflects the actual partitions present in the database.
+    /// This method updates the partitions map to reflect the actual partitions present in the database. It is particularly useful to ensure that the in-memory representation of partitions is consistent with the database, especially after modifications such as adding or dropping partitions.
     ///
     /// # Parameters
-    /// - `db`: A reference to the database connection.
+    /// - `db`: A reference to the database connection. This connection is used to query the current state of the lookup table.
     ///
     /// # Returns
-    /// - `Result<()>`: Indicates success or failure of the synchronization process.
+    /// - `Result<()>`: Indicates success or failure of the synchronization process. Returns `Ok(())` on successful synchronization. On failure, returns an error detailing the issue encountered.
+    ///
+    /// # Errors
+    /// Errors may occur due to issues acquiring write locks on the partitions map, preparing the SQL statement, executing the SQL query, or reading the query results. These errors are wrapped and returned as `sqlite3_ext::Result` for handling.
     pub fn sync(&self, db: &Connection) -> ExtResult<()> {
         // Acquire a write lock on partitions upfront, simplifying error handling.
         let mut borrowed_partitions = self.partitions.write().map_err(|err| {
@@ -252,15 +264,18 @@ impl LookupTable<i64> {
 
     /// Retrieves a list of partitions within a specified range of partition values.
     ///
-    /// This method filters partitions based on the provided bounds and returns their names along with their values.
+    /// This method filters the partitions by the specified range, defined by `from` and `to` bounds, and returns their names along with their corresponding values. It ensures that the lookup table's partition map is synchronized with the database state before fetching the partition information.
     ///
     /// # Parameters
-    /// - `db`: A reference to the database connection.
-    /// - `include`: The lower bound of the range (inclusive or exclusive).
-    /// - `exclude`: The upper bound of the range (inclusive or exclusive).
+    /// - `db`: A reference to the database connection. Used for syncing the lookup table and querying partition data.
+    /// - `from`: The lower bound of the partition value range. This can be inclusive or exclusive, represented as a `Bound<i64>`.
+    /// - `to`: The upper bound of the partition value range, similar to `from`, represented as a `Bound<i64>`.
     ///
     /// # Returns
-    /// - `Result<Vec<(i64, String)>>`: A vector of tuples containing partition values and their corresponding table names.
+    /// - `Result<Vec<(i64, String)>>`: On success, returns a vector of tuples where each tuple contains a partition value and the corresponding partition table name within the specified range. On failure, returns an error.
+    ///
+    /// # Errors
+    /// This method may return an error if issues occur during the synchronization process, acquiring read permissions for the partitions map, or if the specified range is invalid. Errors are returned as `sqlite3_ext::Result`.
     pub fn get_partitions_by_range(
         &self,
         db: &Connection,
@@ -284,23 +299,32 @@ impl LookupTable<i64> {
         Ok(pair)
     }
 
-    /// Returns the full name of the lookup table by combining the base name with a predefined postfix.
-    ///
-    /// # Returns
-    /// - `String`: The full name of the lookup table.
-    // fn get_lookup_table_name(&self) -> String {
-    //     format!("{}_{}", , Self::POSTFIX)
-    // }
-
     /// Connects to an existing lookup table in the database, initializing the `LookupTable` instance
-    /// based on the retrieved partitions.
+    /// based on the retrieved schema and partitions.
+    ///
+    /// This method is designed to establish a connection with an already existing lookup table
+    /// identified by the base name. It retrieves the table's schema and synchronizes the internal
+    /// partitions map with the current state of the table in the database. This ensures that the
+    /// `LookupTable` instance reflects the actual structure and partitioning information of the table
+    /// at the time of connection.
     ///
     /// # Parameters
-    /// - `db`: A reference to the database connection.
-    /// - `name`: The base name of the lookup table to connect to.
+    /// - `db`: A reference to the database connection. Used for accessing the lookup table and
+    ///   performing the synchronization.
+    /// - `base_name`: The base name of the lookup table to connect to. This is used to identify
+    ///   the table within the database.
     ///
     /// # Returns
-    /// - `Result<Self>`: An instance of `LookupTable`.
+    /// - `Result<Self>`: On successful connection, returns an instance of `LookupTable` configured
+    ///   with the schema and partitions of the existing lookup table. On failure, returns an error
+    ///   detailing the issue encountered during the connection process.
+    ///
+    /// # Errors
+    /// This method may return an error if there are issues retrieving the schema for the lookup table,
+    /// synchronizing the partitions map, or if the lookup table specified by the base name does not
+    /// exist in the database. Additionally, errors could arise from problems with the database
+    /// connection itself. All errors are returned as `ExtResult<Self>`, providing detailed information
+    /// about the failure.
     pub fn connect(db: &Connection, base_name: &str) -> ExtResult<Self> {
         let table_name = &Self::format_name(base_name);
         let schema = <Self as Connect>::schema(db, table_name)?;
@@ -314,12 +338,21 @@ impl LookupTable<i64> {
 
     /// Inserts a new partition into the lookup table and updates the internal partitions map.
     ///
+    /// This method adds a new partition with the specified name and value into the lookup table.
+    /// It ensures the new partition is properly recorded in the database and updates the in-memory
+    /// partitions map to reflect this addition. This method is crucial for maintaining the integrity
+    /// and accuracy of the partitioning system.
+    ///
     /// # Parameters
-    /// - `db`: A reference to the database connection.
-    /// - `partition_value`: The value of the new partition to insert.
+    /// - `db`: A reference to the database connection. Used to execute the insert operation in the lookup table.
+    /// - `partition_name`: The name of the new partition to insert. This name should be unique within the lookup table.
+    /// - `partition_value`: The value associated with the new partition. This value is used to determine the partition's position and relationship with other partitions.
     ///
     /// # Returns
-    /// - `Result<String>`: The name of the newly inserted partition table.
+    /// - `Result<&str>`: On successful insertion, returns the name of the newly inserted partition table. On failure, returns an error detailing the issue encountered during the insertion process.
+    ///
+    /// # Errors
+    /// This method may return an error if there are issues executing the insert query, such as database connectivity problems, violations of unique constraints, or if the provided partition name or value is invalid. Errors are wrapped and returned as `ExtResult<&str>` for handling.
     pub(crate) fn insert<'a>(
         &'a self,
         db: &Connection,

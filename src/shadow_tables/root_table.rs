@@ -15,17 +15,27 @@ use super::PartitionValue;
 use super::operations::Table;
 use super::PartitionType;
 
+/// Represents the root table in a database partitioning scheme, which manages partition metadata.
+///
+/// This table tracks the partition column and the corresponding interval for dynamic partitioning
+/// of data based on specified criteria, I.E the time interval specified at creation. It is a central component in
+/// implementing an efficient and scalable partitioning strategy.
 #[derive(Debug, Clone)]
 pub struct RootTable {
+    /// The name of the column used for partitioning the data.
     partition_column: String,
+    /// The interval at which new partitions are created.
     interval: i64,
+    /// The schema declaration for the root table, detailing its structure.
     schema: SchemaDeclaration,
 }
 
 impl Table for RootTable {
+    /// Returns the schema declaration of the root table.
     fn schema(&self) -> &SchemaDeclaration {
         &self.schema
     }
+    /// Specifies the postfix for the root table's name to distinguish it from other table types.
     const POSTFIX: &'static str = "root";
 }
 impl Create for RootTable {}
@@ -33,17 +43,32 @@ impl Drop for RootTable {}
 impl Connect for RootTable {}
 
 impl PartitionType for RootTable {
+    /// The column name storing partition identifier, E.G the column which is used for partitioning the table will be stored in this column.
     const PARTITION_NAME_COLUMN: &'static str = "partition_column";
+    /// The column name storing partition values, the specified interval will be stored here as a
+    /// integer value in seconds. E.G 3600 if the interval was set to 1 hour.
     const PARTITION_VALUE_COLUMN: &'static str = "partition_value";
+    /// The data type of the partition value column, indicating the nature of partitioning (e.g., time intervals).
     const PARTITION_VALUE_COLUMN_TYPE: &'static PartitionValue = &PartitionValue::Interval;
+    /// The data type of the partition name column, typically text for naming partitions.
     const PARTITION_NAME_COLUMN_TYPE: &'static ValueType = &ValueType::Text;
 }
 
 impl RootTable {
+    /// Accesses the partition column name.
     pub fn partition_column(&self) -> &str {
         &self.partition_column
     }
-    /// Creates a new `RootTable` instance with specified name, partition column, and interval.
+    /// Constructs and initializes a new `RootTable` instance with the provided specifications,
+    /// including the creation of the table schema in the database.
+    ///
+    /// Parameters:
+    /// - `db`: Database connection for executing the creation.
+    /// - `base_name`: Base name for the table, used to derive the full table name.
+    /// - `partition_column`: Name of the column to be used for partitioning.
+    /// - `interval`: Interval value for creating new partitions.
+    ///
+    /// Returns a newly created `RootTable` instance.
     pub fn create(
         db: &Connection,
         base_name: &str,
@@ -62,6 +87,15 @@ impl RootTable {
 
         Ok(table)
     }
+
+    /// Connects to an existing `RootTable` based on the base name, retrieving its schema
+    /// and configuration from the database.
+    ///
+    /// Parameters:
+    /// - `db`: Database connection for querying the table.
+    /// - `base_name`: Base name of the table to connect to.
+    ///
+    /// Returns the connected `RootTable` instance.
     pub fn connect(db: &Connection, base_name: &str) -> ExtResult<Self> {
         let table_name = &Self::format_name(base_name);
         let schema = <Self as Connect>::schema(db, &table_name.to_string())?;
@@ -95,6 +129,13 @@ impl RootTable {
         })
     }
 
+    /// Inserts partition metadata into the root table, recording a new partition's details.
+    /// This should only be executed once, at creation. Only one row should be present in the root
+    /// table
+    /// Parameters:
+    /// - `db`: Database connection for the insert operation.
+    ///
+    /// Returns a boolean indicating success of the insertion.
     fn insert(&self, db: &Connection) -> ExtResult<bool> {
         let partition_name_column = Self::partition_name_column().get_name().to_owned();
         let partition_value_column = Self::partition_value_column().get_name().to_owned();
@@ -107,7 +148,9 @@ impl RootTable {
         Ok(true)
     }
 
-    /// Retrieves the interval for table partitioning
+    /// Retrieves the interval at which new partitions are created for the table.
+    ///
+    /// Returns the interval value as an `i64`.
     pub fn get_interval(&self) -> i64 {
         self.interval
     }

@@ -4,12 +4,23 @@ use super::operations::{Connect, Create, Drop, SchemaDeclaration, Table};
 use crate::{shadow_tables::operations::Copy, ColumnDeclarations};
 use sqlite3_ext::{Connection, FallibleIterator, FallibleIteratorMut, FromValue, Result};
 use sqlparser::{dialect::SQLiteDialect, parser::Parser};
+
+/// Represents a template table in a database schema, used as a blueprint for creating
+/// new tables with a similar structure, often in the context of data partitioning or replication.
+///
+/// The `TemplateTable` is designed to facilitate operations like copying itself to create
+/// new tables with identical schemas but different data, enabling efficient data management
+/// and scalability within the database.
 #[derive(Debug)]
 pub struct TemplateTable {
+    /// The schema declaration of the template table, describing the structure of the partitions.
     pub(super) schema: SchemaDeclaration,
 }
 impl Table for TemplateTable {
+    /// Specifies a postfix for distinguishing the template table.
     const POSTFIX: &'static str = "template";
+
+    /// Accesses the schema declaration of the template table.
     fn schema(&self) -> &SchemaDeclaration {
         &self.schema
     }
@@ -19,6 +30,17 @@ impl Create for TemplateTable {}
 impl Drop for TemplateTable {}
 impl Connect for TemplateTable {}
 impl TemplateTable {
+    /// Creates a new template table in the database based on the provided name and column declarations.
+    ///
+    /// This method initializes the table's schema and persists it in the database, effectively creating
+    /// the template table for future use in data partitioning or table replication.
+    ///
+    /// Parameters:
+    /// - `db`: Database connection for executing the creation.
+    /// - `name`: Base name for the template table, used to derive the full table name.
+    /// - `column_declarations`: Column declarations specifying the structure of the table.
+    ///
+    /// Returns a newly created `TemplateTable` instance.
     pub fn create(
         db: &Connection,
         name: &str,
@@ -29,11 +51,26 @@ impl TemplateTable {
 
         Ok(Self { schema })
     }
+
+    /// Connects to an existing template table in the database, retrieving its schema and configuration.
+    ///
+    /// Parameters:
+    /// - `db`: Database connection for querying the table.
+    /// - `name`: Base name of the template table to connect to.
+    ///
+    /// Returns the connected `TemplateTable` instance.
     pub fn connect(db: &Connection, name: &str) -> Result<Self> {
         let table_name = Self::format_name(name);
         let schema = <Self as Connect>::schema(db, &table_name)?;
         Ok(Self { schema })
     }
+
+    /// Generates an SQL query for copying the template table's structure to a new table.
+    ///
+    /// Parameters:
+    /// - `new_table_name`: The name of the new table to create from the template.
+    ///
+    /// Returns the SQL CREATE TABLE query string.
     fn copy_query(&self, new_table_name: &str) -> String {
         format!(
             "CREATE TABLE IF NOT EXISTS {} AS SELECT * FROM {}",
@@ -41,6 +78,17 @@ impl TemplateTable {
             self.name()
         )
     }
+
+    /// Copies the template table to create a new partition with the same structure but a different name.
+    ///
+    /// This operation facilitates data partitioning or replication by replicating the schema of the
+    /// template table.
+    ///
+    /// Parameters:
+    /// - `new_table_name`: The name of the new table to be created.
+    /// - `db`: Database connection for executing the copy operation.
+    ///
+    /// Returns the name of the newly created table.
     pub fn copy<'a>(
         &self,
         new_table_name: &'a str,
@@ -50,7 +98,17 @@ impl TemplateTable {
         Connection::execute(db, &sql, ())?;
         Ok(new_table_name)
     }
-    // This function abstracts the logic for adjusting the index creation SQL.
+
+    /// Generates and executes SQL queries for copying all indices from the template table to a new table.
+    ///
+    /// This method handles the duplication of index structures to maintain the same indexing on the new table,
+    /// ensuring that performance and data access patterns are consistent.
+    ///
+    /// Parameters:
+    /// - `db`: Database connection for querying existing indices and executing the copy operations.
+    /// - `new_table`: The name of the new table to which indices will be copied.
+    ///
+    /// Returns a vector of SQL queries used to copy the indices.
 
     pub fn copy_indices_query(&self, db: &Connection, new_table: &str) -> Result<Vec<String>> {
         let dialect = SQLiteDialect {};
