@@ -221,7 +221,7 @@ The sqlite3-partitioner project is designed to enhance SQLite databases by intro
 Use the CREATE VIRTUAL TABLE SQL command to define a new virtual table using the partitioner. Specify the partitioning interval (e.g., 1 hour) and the column arguments. Mark one column as the "partition_column," which will be used to determine the partitioning. This column should have the data type timestamp, but it will be stored as TEXT.
 > ```console
 > $ CREATE VIRTUAL TABLE test USING partitioner(
->    '1 hour', 
+>    1 hour, 
 >    col1 timestamp partition_column, 
 >    col2 varchar
 > );
