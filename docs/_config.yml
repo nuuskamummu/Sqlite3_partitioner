@@ -19,11 +19,12 @@
 # in the templates via {{ site.myvariable }}.
 domain: nuuskamummu.github.io       # Optional in this context, but can be included
 url: https://nuuskamummu.github.io  # The base hostname and protocol for your site
-baseurl: /Sqlite3_partitioner/      # The subpath of your site, e.g., /repository-name/
+baseurl: /Sqlite3_partitioner      # The subpath of your site, e.g., /repository-name/
 repository: nuuskamummu/Sqlite3_partitioner # for github-metadata
 title: Sqlite3 Timeseries Partitioner
 email: tom@rosenlundsit.se
 description: This dynamic loadable library built with Rust for SQLite3 enables automatic time series partitioning based on an user specified interval. Open source project released under Apache 2.0.
+source: docs
 
 aux_links:
   "Sqlite3_partitioner on GitHub":
