@@ -5,9 +5,6 @@
     <h1 align="center"></h1>
 </p>
 <p align="center">
-    <em>Partitioning Data, Enhancing Performance, Empowering SQL <sub><sup>tacky enough?</sup></sub></em>
-</p>
-<p align="center">
 	<!-- local repository, no metadata badges. -->
 <p>
 <p align="center">
@@ -40,7 +37,7 @@
 
 ##  Overview
 
-The sqlite3-partitioner project is designed to enhance SQLite databases by introducing efficient data partitioning capabilities. Through its architecture, it enables dynamic query generation, data segmentation, and optimized data retrieval mechanisms leveraging Rusts robust type system. This project streamlines database schema management, supports complex query formulation, and facilitates scalable data management via shadow tables interfaced by a virtual table. By extending SQLites functionalities, sqlite3-partitioner significantly improves database performance and storage efficiency, making it a useful tool for developers seeking to manage large datasets within SQLite databases effectively.
+The sqlite3-partitioner project is designed to enhance SQLite databases by introducing efficient data partitioning capabilities. Right now, only timeseries partitioning is supported. I hope to make other partitioning methods available in the future.
 
 ---
 
@@ -51,12 +48,12 @@ The sqlite3-partitioner project is designed to enhance SQLite databases by intro
 | ⚙️  | **Architecture**  | Utilizes Rust and SQLite for a partitioning solution, focusing on efficient data segmentation. Incorporates a modular design with clear separations for error handling, types, utilities, shadow tables, and virtual table operations, ensuring a scalable and maintainable architecture.           |
 | 🔩 | **Code Quality**  | Adheres to Rust's safety and performance principles, with a focus on type safety and efficient error handling. The organization of functionalities into modules and reusable components indicates high code quality and maintainability.                                                        |
 | 📄 | **Documentation** | Each module and key functionality within the repository is described.                    |
-| 🔌 | **Integrations**  | Integrates closely with SQLite for database operations and leverages Rust's ecosystem for type safety and performance. There's a heavy reliance on SQLite's features for partitioning and managing database schemas, indicating advanced database integration capabilities.                        |
-| 🧩 | **Modularity**    | High modularity is evident through the structured organization into various modules such as shadow tables, types, utilities, and virtual table operations. This allows for reusability and maintainability of the codebase, facilitating easy updates and feature expansion.                      |
+| 🔌 | **Integrations**  | Integrates closely with SQLite for database operations by using the SQLite3 Virtual Table Module. Leverages Rust's ecosystem for type safety and performance.                        |
+| 🧩 | **Modularity**    | High modularity through structuring the code into various modules. This allows for reusability and maintainability of the codebase, facilitating easy updates and feature expansion.                      |
 | 🧪 | **Testing**       | Could be better to be honest.                                                       |
-| ⚡️ | **Performance**   | Designed with performance in mind, leveraging Rust's efficiency and SQLite's partitioning capabilities to enhance data access and manipulation speed. Focuses on optimizing SQL queries and data storage strategies for better performance in database operations.                               |
-| 🛡️ | **Security**      | While specific security measures are not detailed, the use of Rust suggests a focus on type safety and memory safety. SQL operations within a controlled environment might mitigate common vulnerabilities, but the project’s approach to data protection and access control requires further review. |
-| 📦 | **Dependencies**  | Key dependencies include Rust libraries and SQLite for database management and operations. `Cargo.toml` and `Cargo.lock` manifesting project dependencies.                                               |
+| ⚡️ | **Performance**   | Designed with performance in mind. Values are mostly passed by reference by leveraging Rust's safe and efficient borrowing rules.                               |
+| 🛡️ | **Security**      | By using Rust, type safety and memory safety should be ensured. Dynamic SQL generation could benefit from further review to confirm adequate protection against SQL injection. |
+| 📦 | **Dependencies**  | Key dependencies include Rust libraries and SQLite for database management and operations. Please refer to `Cargo.toml` and `Cargo.lock` for specific project dependencies.                                               |
 | 🚀 | **Scalability**   | The architecture supports scalable database management operations through efficient data partitioning. The modular design facilitates easy expansion and adaptation to increased data volume or complexity without significant restructuring.                                   |
 ```
 
@@ -327,3 +324,4 @@ This project is protected under the Apache 2.0 (https://www.apache.org/licenses/
 [**Back to the top**](#-overview)
 
 ---
+

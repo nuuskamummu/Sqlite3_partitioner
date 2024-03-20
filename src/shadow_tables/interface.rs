@@ -220,9 +220,60 @@ impl<'vtab> VirtualTable<'vtab> {
             .join(",");
         let sql = format!("INSERT INTO {} VALUES({})", partition, placeholders);
         let mut stmt = self.connection.prepare(&sql)?;
-        for (index, &column) in columns.iter().enumerate() {
+        for (index, column) in columns.iter().enumerate() {
             column.bind_param(&mut stmt, (index + 1) as i32)?
         }
         stmt.insert(())
     }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use std::ops::{Deref, Index, IndexMut};
+
+    use crate::{utils::parse_interval, PartitionColumn};
+
+    use super::*;
+    use rusqlite::Connection as RusqConn;
+    use sqlite3_ext::Connection;
+    fn mock_template() -> (String, ColumnDeclarations, PartitionColumn, i64) {
+        let columns = ColumnDeclarations::from_iter(&[
+            "first_column timestamp partition_column",
+            "second_column int",
+            "third_column varchar",
+        ]);
+        let partition_column = PartitionColumn::from_iter(columns.clone());
+        let interval = parse_interval("1 hour").unwrap();
+        ("test".to_string(), columns, partition_column, interval)
+    }
+
+    fn create_virtual_table<'test>(conn: &'test Connection) -> VirtualTable<'test> {
+        let (name, columns, partition_column, interval) = mock_template();
+        let partition_column_name = partition_column.column_def().as_ref().unwrap().get_name();
+        let table = VirtualTable::create(
+            conn,
+            &name,
+            columns,
+            partition_column_name.to_string(),
+            interval,
+        );
+        assert!(table.is_ok());
+        let table = table.unwrap();
+        table
+    }
+    // #[test]
+    // fn test_create_virtual_table() {
+    //     let conn = match RusqConn::open_in_memory() {
+    //         Ok(conn) => conn,
+    //         Err(err) => panic!("{}", err.to_string()),
+    //     };
+    //     let conn = Connection::from_rusqlite(&conn);
+    //
+    //     let virtual_table = create_virtual_table(&conn);
+    //     let lookup_schema = virtual_table.lookup().schema();
+    //     let root_schema = virtual_table.root_table.schema();
+    //     let template_schema = virtual_table.template_table.schema();
+    //     assert!(virtual_table)
+    // }
 }
