@@ -87,3 +87,235 @@ fn construct_where_clause(
         .collect();
     Ok(where_clauses)
 }
+
+#[cfg(test)]
+mod tests {
+
+    use std::ops::{Index, IndexMut};
+
+    use rusqlite::Connection as RusqConn;
+    use sqlite3_ext::{Connection, FromValue};
+
+    use super::init;
+    fn setup_db(rusq_conn: &RusqConn) -> &Connection {
+        let conn = Connection::from_rusqlite(rusq_conn);
+        conn
+    }
+    fn init_rusq_conn() -> RusqConn {
+        RusqConn::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn test_load_extension() {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+    }
+    #[test]
+    fn test_create_virtual_table() {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok())
+    }
+    #[test]
+    fn test_create_virtual_table_no_partition_column() {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp, col2 text)";
+        assert!(db.execute(sql, ()).is_err())
+    }
+
+    #[test]
+    fn test_create_virtual_table_no_interval() {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_err())
+    }
+    #[test]
+    fn test_created_root_table() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        db.query_row(
+            "SELECT sql FROM sqlite_schema where name = 'test_root'",
+            (),
+            |result| {
+                let result_query = result.index_mut(0).get_str()?;
+                assert_eq!(
+                    result_query,
+                    "CREATE TABLE test_root (partition_column TEXT, partition_value INTEGER)"
+                );
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_created_lookup_table() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        db.query_row(
+            "SELECT sql FROM sqlite_schema where name = 'test_lookup'",
+            (),
+            |result| {
+                let result_query = result.index_mut(0).get_str()?;
+                assert_eq!(
+                    result_query,
+                    "CREATE TABLE test_lookup (partition_table TEXT UNIQUE, partition_value INTEGER UNIQUE)"
+                );
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+    #[test]
+    fn test_created_template_table() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        db.query_row(
+            "SELECT sql FROM sqlite_schema where name = 'test_template'",
+            (),
+            |result| {
+                let result_query = result.index_mut(0).get_str()?;
+                assert_eq!(
+                    result_query,
+                    "CREATE TABLE test_template (col1 TEXT, col2 TEXT)"
+                );
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        assert!(db
+            .insert("INSERT INTO test values ('2024-01-01', 'test string')", ())
+            .is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_without_partition_column() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        assert!(db
+            .insert("INSERT INTO test (col2) values ('test string')", ())
+            .is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_only_partition_column() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        assert!(db
+            .insert("INSERT INTO test (col1) values ('2024-02-01')", ())
+            .is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_hourly_interval() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        assert!(db
+            .insert(
+                "INSERT INTO test (col1) values ('2024-02-01'),('2024-02-02 11:00'),('2024-02-02 12:00'),('2024-02-02 13:00'),('2024-02-02 14:00'),('2024-02-02 15:00'),('2024-02-02 15:30'),('2024-02-02 16:00'),('2024-02-02 17:00'),('2024-02-02 18:00')",
+                ()
+            )
+            .is_ok());
+        db.query_row("SELECT count(*) from test_lookup", (), |res| {
+            let count = res.index(0).get_i64();
+            assert_eq!(count, 9);
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_daily_interval() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 day, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        assert!(db
+            .insert(
+                "INSERT INTO test (col1) values ('2024-02-01'),('2024-02-02 11:00'),('2024-02-02 12:00'),('2024-02-02 13:00'),('2024-02-02 14:00'),('2024-02-02 15:00'),('2024-02-02 15:30'),('2024-02-02 16:00'),('2024-02-02 17:00'),('2024-02-02 18:00')",
+                ()
+            )
+            .is_ok());
+        db.query_row("SELECT count(*) from test_lookup", (), |res| {
+            let count = res.index(0).get_i64();
+            assert_eq!(count, 2);
+            Ok(())
+        })?;
+        Ok(())
+    }
+    #[test]
+    fn test_select() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 day, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        assert!(db
+            .insert(
+                "INSERT INTO test (col1) values ('2024-02-01'),('2024-02-03'),('2024-02-04'),('2024-02-05'),('2024-02-06'),('2024-02-07'),('2024-02-08'),('2024-02-09'),('2024-02-10'),('2024-02-11')",
+                ()
+            )
+            .is_ok());
+        db.query_row(
+            "SELECT count(*) from test where col1 > '2024-02-10'",
+            (),
+            |res| {
+                let count = res.index(0).get_i64();
+                assert_eq!(count, 1);
+                Ok(())
+            },
+        )?;
+
+        db.query_row(
+            "SELECT count(*) from test where col1 > '2024-02-10' or col1 < '2024-02-05'",
+            (),
+            |res| {
+                let count = res.index(0).get_i64();
+                assert_eq!(count, 4);
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+}
