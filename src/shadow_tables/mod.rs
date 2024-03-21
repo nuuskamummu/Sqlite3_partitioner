@@ -20,14 +20,14 @@ pub enum PartitionValue {
 impl From<PartitionValue> for ValueType {
     fn from(value: PartitionValue) -> ValueType {
         match value {
-            PartitionValue::Interval => ValueType::Text,
+            PartitionValue::Interval => ValueType::Integer,
         }
     }
 }
 impl<'a> From<&'a PartitionValue> for &'a ValueType {
     fn from(value: &'a PartitionValue) -> &'a ValueType {
         match value {
-            PartitionValue::Interval => &ValueType::Text,
+            PartitionValue::Interval => &ValueType::Integer,
         }
     }
 }

@@ -406,19 +406,32 @@ mod tests {
         let declarations =
             ColumnDeclarations::from_iter(&["col1 timestamp partition_column", "col2 text"]);
 
-        let virutal_table =
+        let virtual_table =
             VirtualTable::create(db, "test", declarations, "col1".to_string(), 3600).unwrap();
-        virutal_table
+        virtual_table
     }
-    // #[test]
-    // fn test_create_table_query() {
-    //     let lookup_table = setup_lookup_table();
-    //     let query = lookup_table.lookup.();
-    //     assert_eq!(
-    //         query,
-    //         "CREATE TABLE test_lookup (partition_table varchar UNIQUE, partition_value integer UNIQUE);"
-    //     );
-    // }
+    #[test]
+    fn test_create_table_query() {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        let virtual_table = setup_lookup_table(db);
+        let lookup = virtual_table.lookup();
+        let query = LookupTable::table_query(lookup.schema()).unwrap();
+        assert_eq!(
+            query,
+            "CREATE TABLE test_lookup (partition_table TEXT UNIQUE, partition_value INTEGER UNIQUE);"
+        );
+    }
+    #[test]
+    fn test_connect_to_lookup() {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        let table = LookupTable::connect(db, "test");
+        assert!(table.is_err());
+        setup_lookup_table(db);
+        let table = LookupTable::connect(db, "test");
+        assert!(table.is_ok())
+    }
     #[test]
     fn test_insert() -> SqlResult<()> {
         let rusq_conn = init_rusq_conn();
@@ -468,6 +481,33 @@ mod tests {
         let partition = lookup_table.get_partition(&1710003600)?.unwrap();
         assert_eq!(partition, "test_1710003600".to_string());
 
+        Ok(())
+    }
+    #[test]
+    fn test_get_by_range() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        let virtual_table = setup_lookup_table(db);
+        let lookup_table = virtual_table.lookup();
+        // Pre-insert a partition to simulate existing database state
+        let partition_values = [1710003600, 1710000000, 1710007200];
+        for partition_value in partition_values {
+            lookup_table.insert(
+                virtual_table.connection,
+                &format!("test_{}", partition_value),
+                partition_value,
+            )?;
+            let partition_name = lookup_table.get_partition(&partition_value)?;
+            assert!(partition_name.is_some());
+        }
+        let partitions = lookup_table.get_partitions_by_range(
+            db,
+            &Bound::Included(1710000000),
+            &Bound::Excluded(1710007200),
+        )?;
+        assert_eq!(partitions[0].1, "test_1710000000");
+        assert_eq!(partitions[1].1, "test_1710003600");
+        assert!(partitions.len() == 2);
         Ok(())
     }
 }
