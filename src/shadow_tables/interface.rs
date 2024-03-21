@@ -2,6 +2,7 @@ use sqlite3_ext::query::ToParam;
 use sqlite3_ext::Connection;
 use sqlite3_ext::ValueRef;
 
+use crate::ColumnDeclaration;
 use crate::ColumnDeclarations;
 use crate::LookupTable;
 use crate::RootTable;
@@ -169,7 +170,13 @@ impl<'vtab> VirtualTable<'vtab> {
     /// # Returns
     /// The SQL CREATE TABLE query string.
     pub fn create_table_query(&self) -> String {
-        self.template_table.schema().table_query().clone()
+        let mut interface_schema = self.template_table.schema().clone();
+        // let mut hidden_column =
+        //     ColumnDeclaration::new("_partition".to_string(), sqlite3_ext::ValueType::Text);
+        // hidden_column.set_hidden();
+        interface_schema.name = self.base_name.clone();
+        // interface_schema.columns.0.push(hidden_column);
+        interface_schema.table_query()
     }
 
     /// Accesses the column declarations of the template table.
@@ -262,18 +269,21 @@ mod tests {
         let table = table.unwrap();
         table
     }
-    // #[test]
-    // fn test_create_virtual_table() {
-    //     let conn = match RusqConn::open_in_memory() {
-    //         Ok(conn) => conn,
-    //         Err(err) => panic!("{}", err.to_string()),
-    //     };
-    //     let conn = Connection::from_rusqlite(&conn);
-    //
-    //     let virtual_table = create_virtual_table(&conn);
-    //     let lookup_schema = virtual_table.lookup().schema();
-    //     let root_schema = virtual_table.root_table.schema();
-    //     let template_schema = virtual_table.template_table.schema();
-    //     assert!(virtual_table)
-    // }
+    #[test]
+    fn test_create_virtual_table() {
+        let conn = match RusqConn::open_in_memory() {
+            Ok(conn) => conn,
+            Err(err) => panic!("{}", err.to_string()),
+        };
+        let conn = Connection::from_rusqlite(&conn);
+
+        let virtual_table = create_virtual_table(&conn);
+        let lookup_schema = virtual_table.lookup().schema();
+        let root_schema = virtual_table.root_table.schema();
+        let template_schema = virtual_table.template_table.schema();
+        assert_eq!(
+            virtual_table.create_table_query().to_lowercase(),
+            "create table test (first_column text, second_column integer, third_column text)"
+        )
+    }
 }

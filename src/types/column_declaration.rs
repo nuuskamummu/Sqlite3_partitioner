@@ -51,6 +51,7 @@ pub struct ColumnDeclaration {
     name: String,
     data_type: ValueType,
     is_partition_column: bool,
+    is_hidden: bool,
 }
 
 impl ColumnDeclaration {
@@ -63,6 +64,7 @@ impl ColumnDeclaration {
             name,
             data_type,
             is_partition_column: false,
+            is_hidden: false,
         }
     }
 
@@ -84,6 +86,12 @@ impl ColumnDeclaration {
     /// Indicates whether the column is marked as a partition column.
     pub fn is_partition_column(&self) -> bool {
         self.is_partition_column
+    }
+
+    /// Indicates that this column will be hidden.
+    /// https://www.sqlite.org/vtab.html#hiddencol
+    pub fn set_hidden(&mut self) {
+        self.is_hidden = true;
     }
 }
 
@@ -111,6 +119,7 @@ impl<'a> TryFrom<&'a str> for ColumnDeclaration {
             name: tokens[0].trim().to_string(),
             data_type: parse_value_type(&tokens[1].trim().to_uppercase())?,
             is_partition_column,
+            is_hidden: false,
         })
     }
 }
@@ -130,7 +139,16 @@ impl<'a> TryFrom<&'a str> for ColumnDeclaration {
 impl Display for ColumnDeclaration {
     /// Formats the `ColumnDeclaration` for display, including its name and data type.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("{} {}", self.get_name(), self.get_type()))
+        let hidden = match self.is_hidden {
+            true => " hidden",
+            false => "",
+        };
+        f.write_fmt(format_args!(
+            "{} {}{}",
+            self.get_name(),
+            self.get_type(),
+            hidden
+        ))
     }
 }
 
@@ -173,7 +191,7 @@ impl Display for ColumnDeclarations {
             .iter()
             .map(|column_declaration| column_declaration.to_string())
             .collect::<Vec<String>>()
-            .join(" ,");
+            .join(", ");
         f.write_str(&s)
     }
 }
