@@ -5,22 +5,26 @@ on:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
-  build_and_release:
+  build:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            ext: so
+            file_name: partitioner-x86_64-unknown-linux-gnu.so
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            shell: pwsh
-    steps:
-      - uses: actions/checkout@v2
+            ext: dylib
+            file_name: partitioner-aarch64-apple-darwin.dylib
 
+    steps:
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -28,55 +32,15 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target }}
           override: true
-
-      - name: Build Release
+      - uses: actions/checkout@v3
+      - name: Build
         run: |
           cargo build --release --target ${{ matrix.target }}
-          if [ "${{ runner.os }}" = "Linux" ]; then 
-            echo "ARTIFACT_PATH=./target/${{ matrix.target }}/release/libpartitioner.so" >> $GITHUB_ENV
-          elif [ "${{ runner.os }}" = "macOS" ]; then
-            echo "ARTIFACT_PATH=./target/${{ matrix.target }}/release/libpartitioner.dylib" >> $GITHUB_ENV
-          else
-            echo "ARTIFACT_PATH=./target/${{ matrix.target }}/release/libpartitioner.dll" >> $GITHUB_ENV
-          fi
-        shell: bash
-
-      - name: Package Release Asset
-        run: |
-          if ($env:RUNNER_OS -eq "Windows") {
-            Compress-Archive -Path $env:ARTIFACT_PATH -DestinationPath "${env:ARTIFACT_PATH}.zip"
-            echo "ASSET_PATH=${env:ARTIFACT_PATH}.zip" >> $env:GITHUB_ENV
-          }
-          elseif ($env:RUNNER_OS -eq "macOS") {
-            tar czvf libpartitioner.dylib-${{ matrix.target }}-${{ github.ref }}.tar.gz -C $(dirname $env:ARTIFACT_PATH) $(basename $env:ARTIFACT_PATH)
-            echo "ASSET_PATH=libpartitioner-${{ matrix.target }}-${{ github.ref }}.tar.gz" >> $env:GITHUB_ENV
-          }
-          else {
-            tar czvf libpartitioner.so-${{ matrix.target }}-${{ github.ref }}.tar.gz -C $(dirname $env:ARTIFACT_PATH) $(basename $env:ARTIFACT_PATH)
-            echo "ASSET_PATH=libpartitioner-${{ matrix.target }}-${{ github.ref }}.tar.gz" >> $env:GITHUB_ENV
-          }
-        shell: pwsh
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        if: github.run_number == 1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          mv "./target/${{ matrix.target }}/release/libpartitioner.${{ matrix.ext }}" "./target/${{ matrix.target }}/release/${{ matrix.file_name }}"
+      - name: Upload files to a GitHub release
+        uses: svenstaro/upload-release-action@2.9.0
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ env.ASSET_PATH }}
-          asset_name: ${{ env.ASSET_PATH }}
-          asset_content_type: application/${{ endsWith(env.ASSET_PATH, '.zip') && 'zip' || 'gzip' }}
-
-
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./target/${{ matrix.target }}/release/${{ matrix.file_name }}
+          asset_name: ${{ matrix.file_name }}
+          tag: ${{ github.ref }}
