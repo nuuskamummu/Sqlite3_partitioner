@@ -91,10 +91,12 @@ fn construct_where_clause(
 #[cfg(test)]
 mod tests {
 
-    use std::ops::{Index, IndexMut};
+    use std::ops::{DerefMut, Index, IndexMut};
 
     use rusqlite::Connection as RusqConn;
-    use sqlite3_ext::{Connection, FromValue};
+    use sqlite3_ext::{
+        query::QueryResult, Connection, FallibleIterator, FallibleIteratorMut, FromValue,
+    };
 
     use super::init;
     fn setup_db(rusq_conn: &RusqConn) -> &Connection {
@@ -316,6 +318,47 @@ mod tests {
                 Ok(())
             },
         )?;
+        Ok(())
+    }
+    #[test]
+    fn test_drop() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        let day_in_seconds = 86400;
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 day, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        assert!(db
+            .insert(
+                "INSERT INTO test (col1) values ('2024-02-01'),('2024-02-02'),('2024-02-03'),('2024-02-04'),('2024-02-05'),('2024-02-06'),('2024-02-07'),('2024-02-08'),('2024-02-09'),('2024-02-10')",
+                ()
+            )
+            .is_ok());
+        let mut rows = db.query(
+            "SELECT partition_table from test_lookup order by partition_value asc",
+            (),
+        )?;
+        let partition_names = rows
+            .map(|row| Ok(row.index_mut(0).get_str()?.to_string()))
+            .collect::<Vec<String>>()?;
+
+        partition_names
+            .iter()
+            .enumerate()
+            .for_each(|(index, name)| {
+                assert_eq!(
+                    name.to_owned(),
+                    format!("test_{}", 1706745600 + (day_in_seconds * index))
+                )
+            });
+
+        db.execute("DROP TABLE test", ())?;
+        let rows = db.query(
+            "SELECT partition_table from test_lookup order by partition_value asc",
+            (),
+        );
+        assert!(rows.is_err());
+
         Ok(())
     }
 }
