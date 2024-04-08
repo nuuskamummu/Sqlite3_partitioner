@@ -361,4 +361,50 @@ mod tests {
 
         Ok(())
     }
+    #[test]
+    fn test_update() -> sqlite3_ext::Result<()> {
+        let rusq_conn = init_rusq_conn();
+        let db = setup_db(&rusq_conn);
+        assert!(init(db).is_ok());
+        let sql = "CREATE VIRTUAL TABLE test USING partitioner(1 hour, col1 timestamp partition_column, col2 text)";
+        assert!(db.execute(sql, ()).is_ok());
+        assert!(db
+            .insert(
+                "INSERT INTO test values ('2024-01-01 12:00', 'test string')",
+                ()
+            )
+            .is_ok());
+        assert!(db
+            .insert(
+                "INSERT INTO test values ('2024-01-01 14:00', 'test string')",
+                ()
+            )
+            .is_ok());
+        assert!(db
+            .execute(
+                "UPDATE test SET col2 = 'string test' WHERE col1 > '2024-01-01 13:00'",
+                ()
+            )
+            .is_ok());
+
+        db.query_row(
+            "SELECT col2 from test WHERE col1 = '2024-01-01 14:00'",
+            (),
+            |res| {
+                let col2 = res.index_mut(0).get_str()?;
+                assert_eq!(col2, "string test");
+                Ok(())
+            },
+        )?;
+        db.query_row(
+            "SELECT col2 from test WHERE col1 = '2024-01-01 12:00'",
+            (),
+            |res| {
+                let col2 = res.index_mut(0).get_str()?;
+                assert_eq!(col2, "test string");
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
 }
