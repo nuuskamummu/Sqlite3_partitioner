@@ -31,6 +31,22 @@ impl<'a> From<(&'a WhereClause, &'a &'a mut ValueRef)> for Condition<'a> {
     }
 }
 
+impl<'a> TryFrom<(&'a WhereClause, &'a [&'a mut ValueRef])> for Condition<'a> {
+    type Error = TableError;
+    fn try_from(value: (&'a WhereClause, &'a [&'a mut ValueRef])) -> Result<Self, Self::Error> {
+        let (where_clause, args) = value;
+        args.get(where_clause.get_constraint_index() as usize)
+            .map_or_else(
+                || {
+                    Err(TableError::WhereClause(
+                        "Argument not found for constraint index {}".to_owned(),
+                    ))
+                },
+                |value| Ok(Condition::from((where_clause, value))),
+            )
+    }
+}
+
 /// Attempts to convert a tuple containing a vector of `WhereClause` instances and a slice of
 /// mutable `ValueRef` references into a `Conditions` collection. This transformation is critical
 /// for assembling multiple conditions into a coherent query based on dynamic inputs.
@@ -54,17 +70,7 @@ impl<'a> TryFrom<(&'a Vec<WhereClause>, &'a [&'a mut ValueRef])> for Conditions<
         let (where_clauses, args) = value;
         where_clauses
             .iter()
-            .map(|where_clause| {
-                args.get(where_clause.get_constraint_index() as usize)
-                    .map_or_else(
-                        || {
-                            Err(TableError::WhereClause(
-                                "Argument not found for constraint index {}".to_owned(),
-                            ))
-                        },
-                        |value| Ok(Condition::from((where_clause, value))),
-                    )
-            })
+            .map(|where_clause| Condition::try_from((where_clause, args)))
             .collect()
     }
 }
