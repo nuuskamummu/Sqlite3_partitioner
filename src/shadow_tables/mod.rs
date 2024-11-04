@@ -17,6 +17,13 @@ pub enum PartitionValue {
     Interval,
 }
 
+impl PartitionValue {
+    const fn to_valuetype(partitionvalue: Self) -> ValueType {
+        match partitionvalue {
+            Self::Interval => ValueType::Integer,
+        }
+    }
+}
 impl From<PartitionValue> for ValueType {
     fn from(value: PartitionValue) -> ValueType {
         match value {
@@ -44,27 +51,23 @@ impl<'a> TryFrom<&'a ValueType> for PartitionValue {
         }
     }
 }
-
+// type IntervalPartition = ValueType::Integer;
 pub trait PartitionType {
-    const PARTITION_VALUE_COLUMN_TYPE: &'static PartitionValue;
+    const PARTITION_VALUE_COLUMN_TYPE: PartitionValue;
     const PARTITION_VALUE_COLUMN: &'static str;
     const PARTITION_NAME_COLUMN: &'static str;
-    const PARTITION_NAME_COLUMN_TYPE: &'static ValueType;
+    const PARTITION_NAME_COLUMN_TYPE: ValueType;
+    const PARTITION_IDENTIFIER: ColumnDeclaration = ColumnDeclaration::new(
+        std::borrow::Cow::Borrowed(Self::PARTITION_NAME_COLUMN),
+        Self::PARTITION_NAME_COLUMN_TYPE,
+    );
+    const PARTITION_TYPE: ColumnDeclaration = ColumnDeclaration::new(
+        std::borrow::Cow::Borrowed(Self::PARTITION_VALUE_COLUMN),
+        PartitionValue::to_valuetype(Self::PARTITION_VALUE_COLUMN_TYPE),
+    );
+    const COLUMNS: &'static [ColumnDeclaration] =
+        &[Self::PARTITION_IDENTIFIER, Self::PARTITION_TYPE];
     fn columns() -> ColumnDeclarations {
-        ColumnDeclarations(vec![
-            Self::partition_name_column(),
-            Self::partition_value_column(),
-        ])
-    }
-    fn partition_name_column() -> ColumnDeclaration {
-        ColumnDeclaration::new(
-            Self::PARTITION_NAME_COLUMN.to_string(),
-            *Self::PARTITION_NAME_COLUMN_TYPE,
-        )
-    }
-
-    fn partition_value_column() -> ColumnDeclaration {
-        let value_type: &ValueType = Self::PARTITION_VALUE_COLUMN_TYPE.into();
-        ColumnDeclaration::new(Self::PARTITION_VALUE_COLUMN.to_string(), *value_type)
+        ColumnDeclarations(Self::COLUMNS.to_vec())
     }
 }

@@ -49,9 +49,9 @@ impl PartitionType for RootTable {
     /// integer value in seconds. E.G 3600 if the interval was set to 1 hour.
     const PARTITION_VALUE_COLUMN: &'static str = "partition_value";
     /// The data type of the partition value column, indicating the nature of partitioning (e.g., time intervals).
-    const PARTITION_VALUE_COLUMN_TYPE: &'static PartitionValue = &PartitionValue::Interval;
+    const PARTITION_VALUE_COLUMN_TYPE: PartitionValue = PartitionValue::Interval;
     /// The data type of the partition name column, typically text for naming partitions.
-    const PARTITION_NAME_COLUMN_TYPE: &'static ValueType = &ValueType::Text;
+    const PARTITION_NAME_COLUMN_TYPE: ValueType = ValueType::Text;
 }
 
 impl RootTable {
@@ -77,7 +77,7 @@ impl RootTable {
     ) -> ExtResult<Self> {
         let table_name = Self::format_name(base_name);
         let columns = <Self as PartitionType>::columns();
-        let schema = <Self as Create>::schema(db, table_name.to_string(), columns)?;
+        let schema = <Self as Create>::schema(db, table_name, columns)?;
         let table = Self {
             partition_column,
             interval,
@@ -114,9 +114,9 @@ impl RootTable {
             for index in 0..column_count {
                 let column = row.index_mut(index);
                 let name = column.name()?;
-                if name.eq(<Self as PartitionType>::partition_name_column().get_name()) {
+                if name.eq(<Self as PartitionType>::COLUMNS[0].get_name()) {
                     partition_column = column.get_str()?.to_owned();
-                } else if name.eq(<Self as PartitionType>::partition_value_column().get_name()) {
+                } else if name.eq(<Self as PartitionType>::COLUMNS[1].get_name()) {
                     interval = column.get_i64();
                 }
             }
@@ -137,8 +137,8 @@ impl RootTable {
     ///
     /// Returns a boolean indicating success of the insertion.
     fn insert(&self, db: &Connection) -> ExtResult<bool> {
-        let partition_name_column = Self::partition_name_column().get_name().to_owned();
-        let partition_value_column = Self::partition_value_column().get_name().to_owned();
+        let partition_name_column = Self::COLUMNS[0].get_name().to_owned();
+        let partition_value_column = Self::COLUMNS[1].get_name().to_owned();
         let sql = format!(
             "INSERT INTO {} ({partition_name_column}, {partition_value_column}) VALUES (?, ?);",
             self.name()

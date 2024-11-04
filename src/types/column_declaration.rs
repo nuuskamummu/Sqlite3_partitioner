@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fmt::{self, Display},
     vec,
 };
@@ -48,7 +49,7 @@ impl<'a> From<&'a ColumnDeclaration> for PartitionColumn {
 /// and whether it serves as a partition column.
 #[derive(Clone, Debug)]
 pub struct ColumnDeclaration {
-    name: String,
+    name: Cow<'static, str>,
     data_type: ValueType,
     is_partition_column: bool,
     is_hidden: bool,
@@ -56,7 +57,7 @@ pub struct ColumnDeclaration {
 
 impl ColumnDeclaration {
     /// Constructs a new `ColumnDeclaration`.
-    pub const fn new(name: String, data_type: ValueType) -> Self
+    pub const fn new(name: Cow<'static, str>, data_type: ValueType) -> Self
     where
         Self: Sized,
     {
@@ -116,7 +117,7 @@ impl<'a> TryFrom<&'a str> for ColumnDeclaration {
         }
 
         Ok(Self {
-            name: tokens[0].trim().to_string(),
+            name: Cow::Owned(tokens[0].trim().to_string()),
             data_type: parse_value_type(&tokens[1].trim().to_uppercase())?,
             is_partition_column,
             is_hidden: false,

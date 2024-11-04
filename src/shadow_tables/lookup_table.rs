@@ -75,8 +75,8 @@ pub trait Lookup<T> {
 impl PartitionType for LookupTable<i64> {
     const PARTITION_NAME_COLUMN: &'static str = "partition_table";
     const PARTITION_VALUE_COLUMN: &'static str = "partition_value";
-    const PARTITION_VALUE_COLUMN_TYPE: &'static PartitionValue = &PartitionValue::Interval;
-    const PARTITION_NAME_COLUMN_TYPE: &'static ValueType = &ValueType::Text;
+    const PARTITION_VALUE_COLUMN_TYPE: PartitionValue = PartitionValue::Interval;
+    const PARTITION_NAME_COLUMN_TYPE: ValueType = ValueType::Text;
 }
 impl Table for LookupTable<i64> {
     const POSTFIX: &'static str = "lookup";
@@ -89,8 +89,8 @@ impl Create for LookupTable<i64> {
         Ok(format!(
             "CREATE TABLE {} ({} UNIQUE, {} UNIQUE);",
             schema.name(),
-            <Self as PartitionType>::partition_name_column(),
-            <Self as PartitionType>::partition_value_column()
+            <Self as PartitionType>::COLUMNS[0],
+            <Self as PartitionType>::COLUMNS[1]
         ))
     }
 }
@@ -106,11 +106,11 @@ impl LookupTable<i64> {
         parse_to_unix_epoch(value).map(|epoch| epoch - epoch % interval)
     }
 
-    pub fn partition_table_column(&self) -> ColumnDeclaration {
-        <Self as PartitionType>::partition_name_column()
+    pub fn partition_table_column(&self) -> &'static ColumnDeclaration {
+        &<Self as PartitionType>::COLUMNS[0]
     }
-    pub fn partition_value_column(&self) -> ColumnDeclaration {
-        <Self as PartitionType>::partition_value_column()
+    pub fn partition_value_column(&self) -> &'static ColumnDeclaration {
+        &<Self as PartitionType>::COLUMNS[1]
     }
 
     /// Creates a new instance of `LookupTable` with a specified base name. This involves initializing
