@@ -81,12 +81,13 @@ impl<'vtab> VirtualTable<'vtab> {
         column_declarations: ColumnDeclarations,
         partition_column: String,
         interval: i64,
+        expiration: Option<i64>,
     ) -> sqlite3_ext::Result<Self> {
         Ok(VirtualTable {
             connection: db,
             base_name: name.to_string(),
             lookup_table: LookupTable::create(db, name)?,
-            root_table: RootTable::create(db, name, partition_column, interval)?,
+            root_table: RootTable::create(db, name, partition_column, interval, expiration)?,
             template_table: TemplateTable::create(db, name, column_declarations)?,
         })
     }
@@ -264,6 +265,7 @@ mod tests {
             columns,
             partition_column_name.to_string(),
             interval,
+            None,
         );
         assert!(table.is_ok());
         let table = table.unwrap();

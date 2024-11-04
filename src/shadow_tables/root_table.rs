@@ -6,6 +6,10 @@ use sqlite3_ext::FromValue;
 use sqlite3_ext::Result as ExtResult;
 use sqlite3_ext::ValueType;
 
+use crate::ColumnDeclaration;
+use crate::ColumnDeclarations;
+use crate::PartitionColumn;
+
 use super::operations::Connect;
 use super::operations::Create;
 use super::operations::Drop;
@@ -26,6 +30,8 @@ pub struct RootTable {
     partition_column: String,
     /// The interval at which new partitions are created.
     interval: i64,
+    /// The Lifetime of each partition expressed as seconds
+    expiration: Option<i64>,
     /// The schema declaration for the root table, detailing its structure.
     schema: SchemaDeclaration,
 }
@@ -48,13 +54,24 @@ impl PartitionType for RootTable {
     /// The column name storing partition values, the specified interval will be stored here as a
     /// integer value in seconds. E.G 3600 if the interval was set to 1 hour.
     const PARTITION_VALUE_COLUMN: &'static str = "partition_value";
+
     /// The data type of the partition value column, indicating the nature of partitioning (e.g., time intervals).
     const PARTITION_VALUE_COLUMN_TYPE: PartitionValue = PartitionValue::Interval;
     /// The data type of the partition name column, typically text for naming partitions.
     const PARTITION_NAME_COLUMN_TYPE: ValueType = ValueType::Text;
+    const COLUMNS: &'static [crate::ColumnDeclaration] = &[
+        Self::PARTITION_IDENTIFIER,
+        Self::PARTITION_TYPE,
+        ColumnDeclaration::new(
+            std::borrow::Cow::Borrowed(Self::PARTITION_EXPIRATION_COLUMN),
+            Self::PARTITION_EXPIRATION_COLUMN_TYPE,
+        ),
+    ];
 }
 
 impl RootTable {
+    const PARTITION_EXPIRATION_COLUMN: &'static str = "expiration_value";
+    const PARTITION_EXPIRATION_COLUMN_TYPE: ValueType = ValueType::Integer;
     /// Accesses the partition column name.
     pub fn partition_column(&self) -> &str {
         &self.partition_column
@@ -74,6 +91,7 @@ impl RootTable {
         base_name: &str,
         partition_column: String,
         interval: i64,
+        expiration: Option<i64>,
     ) -> ExtResult<Self> {
         let table_name = Self::format_name(base_name);
         let columns = <Self as PartitionType>::columns();
@@ -81,6 +99,7 @@ impl RootTable {
         let table = Self {
             partition_column,
             interval,
+            expiration,
             schema,
         };
         table.insert(db)?;
@@ -109,6 +128,7 @@ impl RootTable {
         let query = format!("SELECT {columns} FROM {table_name}");
         let mut partition_column: String = String::default();
         let mut interval: i64 = 0i64;
+        let mut expiration: Option<i64> = None;
         db.query_row(&query, (), |row| {
             let column_count = row.len();
             for index in 0..column_count {
@@ -118,6 +138,8 @@ impl RootTable {
                     partition_column = column.get_str()?.to_owned();
                 } else if name.eq(<Self as PartitionType>::COLUMNS[1].get_name()) {
                     interval = column.get_i64();
+                } else if name.eq(<Self as PartitionType>::COLUMNS[2].get_name()) {
+                    expiration = Some(column.get_i64());
                 }
             }
             Ok(())
@@ -126,6 +148,7 @@ impl RootTable {
             schema,
             partition_column,
             interval,
+            expiration,
         })
     }
 
@@ -139,12 +162,18 @@ impl RootTable {
     fn insert(&self, db: &Connection) -> ExtResult<bool> {
         let partition_name_column = Self::COLUMNS[0].get_name().to_owned();
         let partition_value_column = Self::COLUMNS[1].get_name().to_owned();
+        let partition_expiration_column = Self::COLUMNS[2].get_name().to_owned();
+
         let sql = format!(
-            "INSERT INTO {} ({partition_name_column}, {partition_value_column}) VALUES (?, ?);",
+            "INSERT INTO {} ({partition_name_column}, {partition_value_column}, {partition_expiration_column}) VALUES (?, ?, ?);",
             self.name()
         );
 
-        db.insert(&sql, params![self.partition_column, self.get_interval()])?;
+        db.insert(
+            &sql,
+            params![self.partition_column, self.get_interval(), ""], //TODO: Fix proper expiration
+                                                                     //handling
+        )?;
         Ok(true)
     }
 
@@ -173,6 +202,7 @@ mod tests {
             "test",
             "col".to_string(),
             3600,
+            None,
         );
 
         assert_eq!(root_table.as_ref().unwrap().schema().name(), "test_root");
@@ -192,7 +222,8 @@ mod tests {
             Err(err) => panic!("{}", err.to_string()),
         };
         let connection = Connection::from_rusqlite(&rusq_conn);
-        let root_table = RootTable::create(connection, "test", "col".to_string(), 3600).unwrap();
+        let root_table =
+            RootTable::create(connection, "test", "col".to_string(), 3600, None).unwrap();
         root_table.insert(connection).unwrap();
 
         let connected_table = RootTable::connect(connection, "test");

@@ -6,10 +6,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sqlite3_ext::Blob;
 use sqlite3_ext::{vtab::ConstraintOp, Value};
 
-pub use self::column_declaration::{ColumnDeclaration, ColumnDeclarations, PartitionColumn};
-
-mod column_declaration;
+pub mod column_declaration;
 pub mod constraints;
+pub use column_declaration::*;
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone, Copy)]
 #[serde(remote = "ConstraintOp")]

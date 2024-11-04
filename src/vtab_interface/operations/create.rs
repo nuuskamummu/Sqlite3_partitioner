@@ -71,5 +71,6 @@ pub fn create_virtual_table<'a>(
         columns,
         partition_column.get_name().to_string(),
         interval,
+        None,
     )?)
 }
