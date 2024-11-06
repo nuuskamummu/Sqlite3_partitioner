@@ -2,6 +2,7 @@ use sqlite3_ext::query::ToParam;
 use sqlite3_ext::Connection;
 use sqlite3_ext::ValueRef;
 
+use crate::expiration::LifetimeColumn;
 use crate::ColumnDeclaration;
 use crate::ColumnDeclarations;
 use crate::LookupTable;
@@ -81,13 +82,13 @@ impl<'vtab> VirtualTable<'vtab> {
         column_declarations: ColumnDeclarations,
         partition_column: String,
         interval: i64,
-        expiration: Option<i64>,
+        lifetime_column: Option<i64>,
     ) -> sqlite3_ext::Result<Self> {
         Ok(VirtualTable {
             connection: db,
             base_name: name.to_string(),
             lookup_table: LookupTable::create(db, name)?,
-            root_table: RootTable::create(db, name, partition_column, interval, expiration)?,
+            root_table: RootTable::create(db, name, partition_column, interval, lifetime_column)?,
             template_table: TemplateTable::create(db, name, column_declarations)?,
         })
     }
@@ -131,10 +132,16 @@ impl<'vtab> VirtualTable<'vtab> {
             .and_then(|name| match name {
                 None => {
                     let new_partition_name = self.copy(&partition_value.to_string())?;
+                    let lifetime = self.root_table.get_lifetime();
+                    let expires_at = match lifetime {
+                        Some(lifetime) => Some(lifetime + *partition_value),
+                        None => None,
+                    };
                     self.lookup_table.insert(
                         self.connection,
                         &new_partition_name,
                         *partition_value,
+                        expires_at,
                     )?;
                     Ok(new_partition_name)
                 }
@@ -202,6 +209,10 @@ impl<'vtab> VirtualTable<'vtab> {
     /// The partition interval in seconds.
     pub fn partition_interval(&self) -> i64 {
         self.root_table.get_interval()
+    }
+
+    pub fn lifetime(&self) -> Option<i64> {
+        self.root_table.get_lifetime()
     }
 
     /// Provides a reference to the lookup table associated with the virtual table.

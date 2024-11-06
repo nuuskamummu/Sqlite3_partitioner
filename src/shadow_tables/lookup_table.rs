@@ -77,6 +77,14 @@ impl PartitionType for LookupTable<i64> {
     const PARTITION_VALUE_COLUMN: &'static str = "partition_value";
     const PARTITION_VALUE_COLUMN_TYPE: PartitionValue = PartitionValue::Interval;
     const PARTITION_NAME_COLUMN_TYPE: ValueType = ValueType::Text;
+    const COLUMNS: &'static [crate::ColumnDeclaration] = &[
+        Self::PARTITION_IDENTIFIER,
+        Self::PARTITION_TYPE,
+        ColumnDeclaration::new(
+            std::borrow::Cow::Borrowed(Self::PARTITION_EXPIRATION_COLUMN),
+            Self::PARTITION_EXPIRATION_COLUMN_TYPE,
+        ),
+    ];
 }
 impl Table for LookupTable<i64> {
     const POSTFIX: &'static str = "lookup";
@@ -87,10 +95,11 @@ impl Table for LookupTable<i64> {
 impl Create for LookupTable<i64> {
     fn table_query(schema: &SchemaDeclaration) -> Result<String, String> {
         Ok(format!(
-            "CREATE TABLE {} ({} UNIQUE, {} UNIQUE);",
+            "CREATE TABLE {} ({} UNIQUE, {} UNIQUE, {});",
             schema.name(),
             <Self as PartitionType>::COLUMNS[0],
-            <Self as PartitionType>::COLUMNS[1]
+            <Self as PartitionType>::COLUMNS[1],
+            <Self as PartitionType>::COLUMNS[2]
         ))
     }
 }
@@ -102,6 +111,8 @@ pub struct LookupTable<T> {
     pub partitions: RwLock<BTreeMap<T, String>>,
 }
 impl LookupTable<i64> {
+    const PARTITION_EXPIRATION_COLUMN: &'static str = "expires_at";
+    const PARTITION_EXPIRATION_COLUMN_TYPE: ValueType = ValueType::Integer;
     fn parse_partition_value(value: &ValueRef, interval: i64) -> sqlite3_ext::Result<i64> {
         parse_to_unix_epoch(value).map(|epoch| epoch - epoch % interval)
     }
@@ -111,6 +122,9 @@ impl LookupTable<i64> {
     }
     pub fn partition_value_column(&self) -> &'static ColumnDeclaration {
         &<Self as PartitionType>::COLUMNS[1]
+    }
+    pub fn expiration_column(&self) -> &'static ColumnDeclaration {
+        &<Self as PartitionType>::COLUMNS[2]
     }
 
     /// Creates a new instance of `LookupTable` with a specified base name. This involves initializing
@@ -167,8 +181,10 @@ impl LookupTable<i64> {
     fn insert_query(&self) -> String {
         let partition_table_name = self.partition_table_column().get_name().to_owned();
         let partition_value_name = self.partition_value_column().get_name().to_owned();
+        let expiration_column_name = self.expiration_column().get_name().to_owned();
+
         let sql = format!(
-            "INSERT INTO {} ({partition_table_name}, {partition_value_name}) VALUES (?, ?)",
+            "INSERT INTO {} ({partition_table_name}, {partition_value_name}, {expiration_column_name}) VALUES (?, ?, ?)",
             self.name()
         );
         sql
@@ -358,10 +374,12 @@ impl LookupTable<i64> {
         db: &Connection,
         partition_name: &'a str,
         partition_value: i64,
+        expires_at: Option<i64>,
     ) -> ExtResult<&str> {
         Connection::prepare(db, &self.insert_query())?.execute(|stmt: &mut Statement| {
             partition_name.bind_param(stmt, 1)?;
             partition_value.bind_param(stmt, 2)?;
+            expires_at.bind_param(stmt, 3)?;
 
             Ok(())
         })?;
@@ -419,7 +437,7 @@ mod tests {
         let query = LookupTable::table_query(lookup.schema()).unwrap();
         assert_eq!(
             query,
-            "CREATE TABLE test_lookup (partition_table TEXT UNIQUE, partition_value INTEGER UNIQUE);"
+            "CREATE TABLE test_lookup (partition_table TEXT UNIQUE, partition_value INTEGER UNIQUE, expires_at INTEGER);"
         );
     }
     #[test]
@@ -438,11 +456,17 @@ mod tests {
         let db = setup_db(&rusq_conn);
         let virtual_table = setup_lookup_table(db);
         let lookup = virtual_table.lookup();
+        let lifetime = virtual_table.lifetime();
         let partition_value = 1i64;
         let partition_name = lookup.get_partition(&partition_value)?;
         assert!(partition_name.is_none());
         let partition_name = "test_1";
-        let partition = lookup.insert(virtual_table.connection, partition_name, partition_value)?;
+        let partition = lookup.insert(
+            virtual_table.connection,
+            partition_name,
+            partition_value,
+            lifetime,
+        )?;
         assert_eq!(partition, partition_name);
 
         Ok(())
@@ -453,6 +477,7 @@ mod tests {
         let db = setup_db(&rusq_conn);
         let virtual_table = setup_lookup_table(db);
         let lookup_table = virtual_table.lookup();
+        let lifetime = virtual_table.lifetime();
         // Pre-insert a partition to simulate existing database state
         let partition_values = [1710003600, 1710000000, 1710007200];
         for partition_value in partition_values {
@@ -460,6 +485,7 @@ mod tests {
                 virtual_table.connection,
                 &format!("test_{}", partition_value),
                 partition_value,
+                lifetime,
             )?;
             let partition_name = lookup_table.get_partition(&partition_value)?;
             assert!(partition_name.is_some());
@@ -489,6 +515,7 @@ mod tests {
         let db = setup_db(&rusq_conn);
         let virtual_table = setup_lookup_table(db);
         let lookup_table = virtual_table.lookup();
+        let lifetime = virtual_table.lifetime();
         // Pre-insert a partition to simulate existing database state
         let partition_values = [1710003600, 1710000000, 1710007200];
         for partition_value in partition_values {
@@ -496,6 +523,7 @@ mod tests {
                 virtual_table.connection,
                 &format!("test_{}", partition_value),
                 partition_value,
+                lifetime,
             )?;
             let partition_name = lookup_table.get_partition(&partition_value)?;
             assert!(partition_name.is_some());

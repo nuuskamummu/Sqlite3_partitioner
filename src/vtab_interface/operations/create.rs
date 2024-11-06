@@ -1,4 +1,7 @@
+use std::borrow::Borrow;
+
 use crate::error::TableError;
+use crate::expiration::LifetimeColumn;
 use crate::shadow_tables::interface::VirtualTable;
 use crate::shadow_tables::PartitionValue;
 use crate::utils::parse_interval;
@@ -50,10 +53,23 @@ pub fn create_virtual_table<'a>(
     let table_name = args[2];
     let interval_col = args[3];
     let column_args = &args[4..];
+    let mut columns: ColumnDeclarations = ColumnDeclarations::from_iter(column_args);
+    let mut lifetime_column_index: Option<usize> = None;
+    for (index, column) in columns.0.iter().enumerate() {
+        if column.is_lifetime_column() {
+            lifetime_column_index = Some(index);
+            println!("lifetime column: {:#?}", index);
 
-    let columns: ColumnDeclarations = ColumnDeclarations::from_iter(column_args);
-
+            break;
+        }
+    }
+    let lifetime_column: Option<LifetimeColumn> = match lifetime_column_index {
+        Some(index) => Some(columns.0.remove(index)),
+        None => None,
+    };
+    // columns.0.remove(index)
     let interval = parse_interval(interval_col)?;
+    let lifetime: Option<i64> = lifetime_column.and_then(|column| column.default_value());
     let partition_column: ColumnDeclaration =
         match PartitionColumn::from_iter(columns.clone()).column_def() {
             Some(col) => Ok(col),
@@ -62,7 +78,6 @@ pub fn create_virtual_table<'a>(
             )),
         }?
         .clone();
-
     PartitionValue::try_from(partition_column.data_type())?;
 
     Ok(VirtualTable::create(
@@ -71,6 +86,6 @@ pub fn create_virtual_table<'a>(
         columns,
         partition_column.get_name().to_string(),
         interval,
-        None,
+        lifetime,
     )?)
 }

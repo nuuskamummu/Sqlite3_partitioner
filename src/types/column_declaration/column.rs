@@ -6,44 +6,13 @@ use std::{
 
 use sqlite3_ext::ValueType;
 
-use crate::{error::TableError, parse_value_type, utils::value_type_to_string};
+use crate::{
+    error::TableError,
+    parse_value_type,
+    utils::{parse_interval, value_type_to_string},
+};
 
-/// Represents the declaration of a partition column within a table schema, optionally
-/// encapsulating a `ColumnDeclaration` to define the partitioning behavior.
-pub struct PartitionColumn(pub Option<ColumnDeclaration>);
-impl FromIterator<ColumnDeclaration> for PartitionColumn {
-    /// Creates a `PartitionColumn` from an iterator of `ColumnDeclaration` items, selecting
-    /// the first column marked as a partition column, if any.
-    fn from_iter<T: IntoIterator<Item = ColumnDeclaration>>(iter: T) -> Self {
-        let column = iter
-            .into_iter()
-            .find(|col_def| col_def.is_partition_column());
-        Self(column)
-    }
-}
-impl PartitionColumn {
-    /// Returns a reference to the optional `ColumnDeclaration` representing the partition column.
-    pub fn column_def(&self) -> &Option<ColumnDeclaration> {
-        &self.0
-    }
-
-    /// Creates a new `PartitionColumn` with the specified `ColumnDeclaration`.
-    fn new(column_declaration: ColumnDeclaration) -> Self {
-        Self(Some(column_declaration))
-    }
-}
-impl From<ColumnDeclaration> for PartitionColumn {
-    /// Converts a `ColumnDeclaration` into a `PartitionColumn`.
-    fn from(value: ColumnDeclaration) -> Self {
-        Self::new(value)
-    }
-}
-impl<'a> From<&'a ColumnDeclaration> for PartitionColumn {
-    /// Converts a reference to a `ColumnDeclaration` into a `PartitionColumn`.
-    fn from(value: &'a ColumnDeclaration) -> Self {
-        PartitionColumn::new(value.clone())
-    }
-}
+use super::ColumnDeclarations;
 
 /// Describes a single column within a table schema, including its name, data type,
 /// and whether it serves as a partition column.
@@ -53,6 +22,8 @@ pub struct ColumnDeclaration {
     data_type: ValueType,
     is_partition_column: bool,
     is_hidden: bool,
+    is_lifetime_column: bool,
+    default_value: Option<i64>, //TODO:should it really be here? If yes, make it accept any valid datatype
 }
 
 impl ColumnDeclaration {
@@ -66,6 +37,8 @@ impl ColumnDeclaration {
             data_type,
             is_partition_column: false,
             is_hidden: false,
+            is_lifetime_column: false,
+            default_value: None,
         }
     }
 
@@ -89,6 +62,15 @@ impl ColumnDeclaration {
         self.is_partition_column
     }
 
+    /// Indicates whether the column is marked as a partition column.
+    pub fn is_lifetime_column(&self) -> bool {
+        self.is_lifetime_column
+    }
+    /// Indicates whether the column is marked as a partition column.
+    pub fn default_value(&self) -> Option<i64> {
+        self.default_value
+    }
+
     /// Indicates that this column will be hidden.
     /// https://www.sqlite.org/vtab.html#hiddencol
     pub fn set_hidden(&mut self) {
@@ -104,10 +86,19 @@ impl<'a> TryFrom<&'a str> for ColumnDeclaration {
     fn try_from(value: &'a str) -> Result<Self, Self::Error> {
         let tokens: Vec<&str> = value.split_whitespace().collect();
         let mut is_partition_column = false;
-
+        let mut is_lifetime_column = false;
+        let mut value_type: Option<ValueType> = None;
+        let mut default_value: Option<i64> = None;
         if tokens.len() != 2 {
-            if tokens.len() == 3 && tokens[2] == "partition_column" {
-                is_partition_column = true;
+            if tokens.len() == 3 {
+                if tokens[2].to_lowercase().eq("partition_column") {
+                    is_partition_column = true;
+                } else if tokens[0].to_lowercase().eq("lifetime") {
+                    println!("{:#?}", "found lifetime");
+                    is_lifetime_column = true;
+                    value_type = Some(ValueType::Integer);
+                    default_value = Some(parse_interval(&format!("{} {}", tokens[1], tokens[2]))?);
+                }
             } else {
                 return Err(TableError::ColumnDeclaration(format!(
                     "Invalid source string: {}. Expected format 'name type'",
@@ -115,12 +106,17 @@ impl<'a> TryFrom<&'a str> for ColumnDeclaration {
                 )));
             }
         }
-
+        let value_type: ValueType = match value_type {
+            Some(v) => v,
+            None => parse_value_type(&tokens[1].trim().to_uppercase())?,
+        };
         Ok(Self {
             name: Cow::Owned(tokens[0].trim().to_string()),
-            data_type: parse_value_type(&tokens[1].trim().to_uppercase())?,
+            data_type: value_type,
             is_partition_column,
             is_hidden: false,
+            is_lifetime_column,
+            default_value,
         })
     }
 }
@@ -150,65 +146,5 @@ impl Display for ColumnDeclaration {
             self.get_type(),
             hidden
         ))
-    }
-}
-
-/// A collection of `ColumnDeclaration` instances, representing the schema of a table.
-#[derive(Clone, Debug)]
-pub struct ColumnDeclarations(pub Vec<ColumnDeclaration>);
-/// Constructs `ColumnDeclarations` from an iterator over string slices, attempting
-/// to parse each slice into a `ColumnDeclaration`.
-impl<'a> FromIterator<&'a &'a str> for ColumnDeclarations {
-    fn from_iter<T: IntoIterator<Item = &'a &'a str>>(iter: T) -> Self {
-        let columns: Vec<ColumnDeclaration> = iter
-            .into_iter()
-            .filter_map(
-                |&column_arg| match ColumnDeclaration::try_from(column_arg) {
-                    Ok(column) => Some(column),
-                    Err(_) => None,
-                },
-            )
-            .collect();
-        Self(columns)
-    }
-}
-
-impl From<ColumnDeclarations> for String {
-    /// Converts `ColumnDeclarations` into a comma-separated string of column definitions.
-    fn from(value: ColumnDeclarations) -> Self {
-        value
-            .0
-            .into_iter()
-            .map::<String, _>(|col| col.to_string())
-            .collect::<Vec<String>>()
-            .join(", ")
-    }
-}
-impl Display for ColumnDeclarations {
-    /// Formats the `ColumnDeclarations` for display as a comma-separated list of column definitions.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s: String = self
-            .0
-            .iter()
-            .map(|column_declaration| column_declaration.to_string())
-            .collect::<Vec<String>>()
-            .join(", ");
-        f.write_str(&s)
-    }
-}
-
-impl IntoIterator for ColumnDeclarations {
-    /// Provides an iterator over the collection's `ColumnDeclaration` items.
-    type Item = ColumnDeclaration;
-    type IntoIter = vec::IntoIter<Self::Item>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl<'a> From<&'a ColumnDeclarations> for &'a [ColumnDeclaration] {
-    /// Converts a reference to `ColumnDeclarations` into a slice of `ColumnDeclaration`.
-    fn from(value: &'a ColumnDeclarations) -> Self {
-        &value.0
     }
 }

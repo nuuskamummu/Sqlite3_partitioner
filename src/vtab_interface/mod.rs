@@ -152,7 +152,7 @@ mod tests {
                 let result_query = result.index_mut(0).get_str()?;
                 assert_eq!(
                     result_query,
-                    "CREATE TABLE test_root (partition_column TEXT, partition_value INTEGER, expiration_value INTEGER)"
+                    "CREATE TABLE test_root (partition_column TEXT, partition_value INTEGER, lifetime INTEGER)"
                 );
                 Ok(())
             },
@@ -174,7 +174,7 @@ mod tests {
                 let result_query = result.index_mut(0).get_str()?;
                 assert_eq!(
                     result_query,
-                    "CREATE TABLE test_lookup (partition_table TEXT UNIQUE, partition_value INTEGER UNIQUE)"
+                    "CREATE TABLE test_lookup (partition_table TEXT UNIQUE, partition_value INTEGER UNIQUE, expires_at INTEGER)"
                 );
                 Ok(())
             },

@@ -31,7 +31,7 @@ pub struct RootTable {
     /// The interval at which new partitions are created.
     interval: i64,
     /// The Lifetime of each partition expressed as seconds
-    expiration: Option<i64>,
+    lifetime: Option<i64>,
     /// The schema declaration for the root table, detailing its structure.
     schema: SchemaDeclaration,
 }
@@ -63,15 +63,15 @@ impl PartitionType for RootTable {
         Self::PARTITION_IDENTIFIER,
         Self::PARTITION_TYPE,
         ColumnDeclaration::new(
-            std::borrow::Cow::Borrowed(Self::PARTITION_EXPIRATION_COLUMN),
-            Self::PARTITION_EXPIRATION_COLUMN_TYPE,
+            std::borrow::Cow::Borrowed(Self::PARTITION_LIFETIME_COLUMN),
+            Self::PARTITION_LIFETIME_COLUMN_TYPE,
         ),
     ];
 }
 
 impl RootTable {
-    const PARTITION_EXPIRATION_COLUMN: &'static str = "expiration_value";
-    const PARTITION_EXPIRATION_COLUMN_TYPE: ValueType = ValueType::Integer;
+    const PARTITION_LIFETIME_COLUMN: &'static str = "lifetime";
+    const PARTITION_LIFETIME_COLUMN_TYPE: ValueType = ValueType::Integer;
     /// Accesses the partition column name.
     pub fn partition_column(&self) -> &str {
         &self.partition_column
@@ -91,7 +91,7 @@ impl RootTable {
         base_name: &str,
         partition_column: String,
         interval: i64,
-        expiration: Option<i64>,
+        lifetime: Option<i64>,
     ) -> ExtResult<Self> {
         let table_name = Self::format_name(base_name);
         let columns = <Self as PartitionType>::columns();
@@ -99,7 +99,7 @@ impl RootTable {
         let table = Self {
             partition_column,
             interval,
-            expiration,
+            lifetime,
             schema,
         };
         table.insert(db)?;
@@ -128,7 +128,7 @@ impl RootTable {
         let query = format!("SELECT {columns} FROM {table_name}");
         let mut partition_column: String = String::default();
         let mut interval: i64 = 0i64;
-        let mut expiration: Option<i64> = None;
+        let mut lifetime: Option<i64> = None;
         db.query_row(&query, (), |row| {
             let column_count = row.len();
             for index in 0..column_count {
@@ -139,7 +139,7 @@ impl RootTable {
                 } else if name.eq(<Self as PartitionType>::COLUMNS[1].get_name()) {
                     interval = column.get_i64();
                 } else if name.eq(<Self as PartitionType>::COLUMNS[2].get_name()) {
-                    expiration = Some(column.get_i64());
+                    lifetime = Some(column.get_i64());
                 }
             }
             Ok(())
@@ -148,7 +148,7 @@ impl RootTable {
             schema,
             partition_column,
             interval,
-            expiration,
+            lifetime,
         })
     }
 
@@ -162,17 +162,17 @@ impl RootTable {
     fn insert(&self, db: &Connection) -> ExtResult<bool> {
         let partition_name_column = Self::COLUMNS[0].get_name().to_owned();
         let partition_value_column = Self::COLUMNS[1].get_name().to_owned();
-        let partition_expiration_column = Self::COLUMNS[2].get_name().to_owned();
+        let partition_lifetime_column = Self::COLUMNS[2].get_name().to_owned();
 
         let sql = format!(
-            "INSERT INTO {} ({partition_name_column}, {partition_value_column}, {partition_expiration_column}) VALUES (?, ?, ?);",
+            "INSERT INTO {} ({partition_name_column}, {partition_value_column}, {partition_lifetime_column}) VALUES (?, ?, ?);",
             self.name()
         );
-
+        println!("lifetime {:#?}", self.lifetime);
         db.insert(
             &sql,
-            params![self.partition_column, self.get_interval(), ""], //TODO: Fix proper expiration
-                                                                     //handling
+            params![self.partition_column, self.get_interval(), self.lifetime], //TODO: Fix proper expiration
+                                                                                //handling
         )?;
         Ok(true)
     }
@@ -182,6 +182,9 @@ impl RootTable {
     /// Returns the interval value as an `i64`.
     pub fn get_interval(&self) -> i64 {
         self.interval
+    }
+    pub fn get_lifetime(&self) -> Option<i64> {
+        self.lifetime
     }
 }
 
@@ -224,6 +227,22 @@ mod tests {
         let connection = Connection::from_rusqlite(&rusq_conn);
         let root_table =
             RootTable::create(connection, "test", "col".to_string(), 3600, None).unwrap();
+        root_table.insert(connection).unwrap();
+
+        let connected_table = RootTable::connect(connection, "test");
+        assert!(connected_table.is_ok());
+
+        // println!("{:#?}", r);
+    }
+    #[test]
+    fn test_db_create_and_connect_with_lifetime() {
+        let rusq_conn = match RusqConn::open_in_memory() {
+            Ok(conn) => conn,
+            Err(err) => panic!("{}", err.to_string()),
+        };
+        let connection = Connection::from_rusqlite(&rusq_conn);
+        let root_table =
+            RootTable::create(connection, "test", "col".to_string(), 3600, Some(3600)).unwrap();
         root_table.insert(connection).unwrap();
 
         let connected_table = RootTable::connect(connection, "test");

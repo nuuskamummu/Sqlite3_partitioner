@@ -174,6 +174,7 @@ pub fn parse_interval(interval_str: &str) -> Result<i64, TableError> {
     let re = Regex::new(r"(\d+)\s+(\w+)")
         .map_err(|_| TableError::ParseInterval("Failed to compile regex pattern.".to_string()))?;
 
+    println!("lifetime str {:#?}", interval_str);
     // Attempt to find matches in the input string
     let captures = re.captures(interval_str).ok_or(TableError::ParseInterval(
         "Interval format is not valid.".to_string(),
@@ -207,7 +208,7 @@ pub fn parse_interval(interval_str: &str) -> Result<i64, TableError> {
     let size_in_seconds = interval_unit_to_size.get(unit_part).ok_or_else(|| {
         TableError::ParseInterval(format!("Unsupported interval unit: '{}'.", unit_part))
     })?;
-
+    println!("returns {:#?}", numeric_value * size_in_seconds);
     Ok(numeric_value * size_in_seconds)
 }
 
