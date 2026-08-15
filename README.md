@@ -85,14 +85,18 @@ Create a partitioned table:
 ```sql
 CREATE VIRTUAL TABLE events USING partitioner(
     1 hour,                              -- partition interval
+    lifetime 31 day,                     -- optional: partitions expire 31 days after their window
     ts timestamp partition_column,       -- the partition column
     device_id text,
     value real
 );
 ```
 
-Accepted intervals are `[integer] hour` and `[integer] day`. From here on,
-`events` behaves like a normal table — insert, select, update, delete:
+The `lifetime` clause is optional but recommended for time-series data: each
+partition records its expiry, and `partitioner_cleanup` (below) drops expired
+partitions on demand. Accepted intervals are `[integer] hour` and
+`[integer] day`. From here on, `events` behaves like a normal table — insert,
+select, update, delete:
 
 ```sql
 INSERT INTO events (ts, device_id, value) VALUES ('2026-08-15 13:30', 'pump-7', 41.2);
