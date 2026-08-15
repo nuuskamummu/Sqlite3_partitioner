@@ -1,6 +1,6 @@
 [package]
 name = "sqlite3-partitioner"
-version = "0.1.0-alpha"
+version = "0.1.0"
 edition = "2021"
 
 [lib]
