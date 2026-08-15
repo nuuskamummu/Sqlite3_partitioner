@@ -14,6 +14,31 @@ Think of it as declarative partitioning for SQLite: you get partition pruning,
 per-partition indexes, fast counts, and expiry-based cleanup, while your
 application keeps talking to one ordinary-looking table.
 
+The headline feature is **declarative retention**: declare a `lifetime` at
+table creation and every partition knows when it expires. One call to
+`partitioner_cleanup('your_table')` drops all expired partitions — you decide
+when, nothing runs on a schedule. No ranged `DELETE`s, no index churn, no
+fragmentation. Old data simply stops existing.
+
+## Performance
+
+Partitioned vs. a plain table with an equivalent schema and indexes
+(macOS, release build; full methodology and raw logs in
+[benchmark-results/REPORT.md](benchmark-results/REPORT.md)):
+
+| Workload | Partitioned | Plain table | Result |
+|:---------|------------:|------------:|:-------|
+| Insert 10.08M rows, on-disk | 117.8 s | 4044.1 s | **34× faster** |
+| Insert 1.44M rows (12 cols, 5 indexes), on-disk | 34.0 s | 793.7 s | **23× faster** |
+| Insert 10.08M rows, in-memory | 22.4 s | 29.1 s | 1.3× faster |
+| Remove 60 000 old rows | 3.3 ms (`DROP TABLE`) | 32.2 ms (ranged `DELETE`) | **~10× faster** |
+| `partitioner_count_between` over 10.08M rows | ~0.4 ms | — | **~8× faster** than plain count |
+
+Retention is roughly constant in partition size while a ranged `DELETE` is
+O(rows), so the gap grows with partition size. Ad-hoc queries that don't
+constrain the partition column run at parity to somewhat slower — see
+[Known limitations](#known-limitations) for the honest trade-offs.
+
 ## Why partition?
 
 A monolithic time-series table degrades as it grows: every insert maintains
@@ -21,9 +46,7 @@ ever-larger b-trees (one per index), and deleting old data is an
 O(rows × indexes) operation that fragments the file. With partitioning:
 
 - **Inserts stay flat.** Each partition has its own small b-trees; only the
-  current partition is hot. Benchmarks: up to **34× faster** ingest on
-  disk-backed databases (10M rows; see
-  [benchmark-results/REPORT.md](benchmark-results/REPORT.md)).
+  current partition is hot.
 - **Retention is O(1).** Dropping an expired partition is milliseconds,
   regardless of row count — versus a ranged `DELETE` that scales linearly and
   churns every index.
