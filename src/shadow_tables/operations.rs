@@ -52,7 +52,10 @@ pub trait Table {
 pub trait Copy: Table {
     /// Generates an adjusted SQL statement for creating an index on a new table,
     /// modifying the original index statement to target the new table.
-    fn adjust_index_creation_statement(statement: &ParsedStatement, new_table: &str) -> String {
+    fn adjust_index_creation_statement(
+        statement: &ParsedStatement,
+        new_table: &str,
+    ) -> Result<String, String> {
         match statement.to_owned() {
             ParsedStatement::CreateIndex {
                 name,
@@ -65,24 +68,28 @@ pub trait Copy: Table {
                 include,
                 nulls_distinct,
                 predicate,
-            } => ParsedStatement::CreateIndex {
-                name: Some(ObjectName(vec![Ident::new(format!(
-                    "{}_{}",
-                    name.unwrap(),
-                    new_table
-                ))])),
-                table_name: ObjectName(vec![Ident::new(new_table)]),
-                using,
-                columns,
-                unique,
-                concurrently,
-                if_not_exists,
-                include,
-                nulls_distinct,
-                predicate,
+            } => {
+                let name = name.ok_or_else(|| {
+                    "Expected named index when copying index definition".to_string()
+                })?;
+                Ok(ParsedStatement::CreateIndex {
+                    name: Some(ObjectName(vec![Ident::new(format!(
+                        "{}_{}",
+                        name, new_table
+                    ))])),
+                    table_name: ObjectName(vec![Ident::new(new_table)]),
+                    using,
+                    columns,
+                    unique,
+                    concurrently,
+                    if_not_exists,
+                    include,
+                    nulls_distinct,
+                    predicate,
+                }
+                .to_string())
             }
-            .to_string(),
-            _ => unreachable!(),
+            _ => Err("Expected CREATE INDEX statement when copying index definition".to_string()),
         }
     }
 }

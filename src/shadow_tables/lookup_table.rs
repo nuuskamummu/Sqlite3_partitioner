@@ -1,11 +1,10 @@
 use sqlite3_ext::query::{Statement, ToParam};
-use sqlite3_ext::{Connection, Value, ValueRef, ValueType};
+use sqlite3_ext::{Connection, Value, ValueType};
 use sqlite3_ext::{FallibleIteratorMut, FromValue, Result as ExtResult};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::RwLock;
 
-use crate::utils::parse_to_unix_epoch;
 use crate::ColumnDeclaration;
 
 use super::operations::{Connect, Create, Drop, SchemaDeclaration, Table};
@@ -113,9 +112,6 @@ pub struct LookupTable<T> {
 impl LookupTable<i64> {
     const PARTITION_EXPIRATION_COLUMN: &'static str = "expires_at";
     const PARTITION_EXPIRATION_COLUMN_TYPE: ValueType = ValueType::Integer;
-    fn parse_partition_value(value: &ValueRef, interval: i64) -> sqlite3_ext::Result<i64> {
-        parse_to_unix_epoch(value).map(|epoch| epoch - epoch % interval)
-    }
 
     pub fn partition_table_column(&self) -> &'static ColumnDeclaration {
         &<Self as PartitionType>::COLUMNS[0]
@@ -315,6 +311,30 @@ impl LookupTable<i64> {
         Ok(pair)
     }
 
+    pub fn get_expired_partitions(
+        &self,
+        db: &Connection,
+        now_epoch: i64,
+    ) -> ExtResult<Vec<(i64, String)>> {
+        let sql = format!(
+            "SELECT {}, {} FROM {} WHERE {} IS NOT NULL AND {} <= ?;",
+            self.partition_value_column().get_name(),
+            self.partition_table_column().get_name(),
+            self.name(),
+            self.expiration_column().get_name(),
+            self.expiration_column().get_name(),
+        );
+        let mut stmt = db.prepare(&sql)?;
+        let rows = stmt.query([now_epoch])?;
+        let mut expired = Vec::new();
+        while let Ok(Some(row)) = rows.next() {
+            let partition_value = row[0].get_i64();
+            let partition_table_name = row[1].get_str()?.to_string();
+            expired.push((partition_value, partition_table_name));
+        }
+        Ok(expired)
+    }
+
     /// Connects to an existing lookup table in the database, initializing the `LookupTable` instance
     /// based on the retrieved schema and partitions.
     ///
@@ -375,7 +395,7 @@ impl LookupTable<i64> {
         partition_name: &'a str,
         partition_value: i64,
         expires_at: Option<i64>,
-    ) -> ExtResult<&str> {
+    ) -> ExtResult<&'a str> {
         Connection::prepare(db, &self.insert_query())?.execute(|stmt: &mut Statement| {
             partition_name.bind_param(stmt, 1)?;
             partition_value.bind_param(stmt, 2)?;
@@ -397,6 +417,27 @@ impl LookupTable<i64> {
         borrowed_partitions.insert(partition_value, partition_name.to_string());
 
         Ok(partition_name)
+    }
+
+    pub fn delete_partition(&self, db: &Connection, partition_value: i64) -> ExtResult<()> {
+        let sql = format!(
+            "DELETE FROM {} WHERE {} = ?;",
+            self.name(),
+            self.partition_value_column().get_name(),
+        );
+        db.execute(&sql, [partition_value])?;
+
+        let mut borrowed_partitions = self.partitions.write().map_err(|err| {
+            sqlite3_ext::Error::Sqlite(
+                1,
+                Some(format!(
+                    "Error acquiring write permissions to partitions: {}",
+                    err
+                )),
+            )
+        })?;
+        borrowed_partitions.remove(&partition_value);
+        Ok(())
     }
 }
 

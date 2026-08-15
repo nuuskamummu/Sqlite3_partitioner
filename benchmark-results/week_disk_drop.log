@@ -1,0 +1,20 @@
+warning: unused import: `std::collections::HashMap`
+ --> src/vtab_interface/vtab_module.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sqlite3-partitioner` (lib test) generated 1 warning (run `cargo fix --lib -p sqlite3-partitioner --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.15s
+     Running unittests src/lib.rs (target/release/build/sqlite3-partitioner/baf2c170d7a1713f/out/partitioner-baf2c170d7a1713f)
+
+running 1 test
+partition-drop-vs-delete benchmark on 1000 rows/minute for 10080 minutes (10080000 total rows) [memory]
+manual partition drop duration=3.316417ms rows_removed=60000
+plain ranged delete duration=32.204875ms rows_removed=60000
+test benchmarks::benchmark_partition_drop_vs_plain_delete ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 39.18s
+

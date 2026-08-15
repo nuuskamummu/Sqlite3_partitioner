@@ -18,11 +18,18 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             ext: so
+            prefix: lib
             file_name: partitioner-x86_64-unknown-linux-gnu.so
           - os: macos-latest
             target: aarch64-apple-darwin
             ext: dylib
+            prefix: lib
             file_name: partitioner-aarch64-apple-darwin.dylib
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: dll
+            prefix: ""
+            file_name: partitioner-x86_64-pc-windows-msvc.dll
 
     steps:
       - name: Set up Rust
@@ -36,7 +43,7 @@ jobs:
       - name: Build
         run: |
           cargo build --release --target ${{ matrix.target }}
-          mv "./target/${{ matrix.target }}/release/libpartitioner.${{ matrix.ext }}" "./target/${{ matrix.target }}/release/${{ matrix.file_name }}"
+          mv "./target/${{ matrix.target }}/release/${{ matrix.prefix }}partitioner.${{ matrix.ext }}" "./target/${{ matrix.target }}/release/${{ matrix.file_name }}"
       - name: Upload files to a GitHub release
         uses: svenstaro/upload-release-action@2.9.0
         with:

@@ -1,0 +1,25 @@
+warning: unused import: `std::collections::HashMap`
+ --> src/vtab_interface/vtab_module.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sqlite3-partitioner` (lib test) generated 1 warning (run `cargo fix --lib -p sqlite3-partitioner --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running unittests src/lib.rs (target/release/build/sqlite3-partitioner/baf2c170d7a1713f/out/partitioner-baf2c170d7a1713f)
+
+running 1 test
+realistic wide-table benchmark on 1000 rows/minute for 1440 minutes (1440000 total rows) [memory]
+partitioned insert batch size=1000
+partitioned insert duration=10.416072958s
+plain insert duration=16.845863917s
+2-hour ts range: partitioned count=120000 duration=30.772583ms | plain count=120000 duration=3.136708ms
+1-day status+region: partitioned count=360000 duration=191.89975ms | plain count=360000 duration=119.401ms
+1-day device_id: partitioned count=1440 duration=2.258833ms | plain count=1440 duration=1.704583ms
+1-week avg(value_real) by category: partitioned groups=50 duration=873.173667ms | plain groups=50 duration=573.941916ms
+test benchmarks::benchmark_realistic_wide_table ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 29.40s
+

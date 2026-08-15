@@ -65,6 +65,12 @@ impl TemplateTable {
         Ok(Self { schema })
     }
 
+    /// Name of the index on the partition column that every partitioned table gets on
+    /// its template table (and thus on every partition via index copying).
+    pub fn partition_column_index_name(base_name: &str) -> String {
+        format!("{}_template_partition_column_idx", base_name)
+    }
+
     /// Generates an SQL query for copying the template table's structure to a new table.
     ///
     /// Parameters:
@@ -131,7 +137,8 @@ impl TemplateTable {
         let index_queries = statements
             .iter()
             .map(|statement| <Self as Copy>::adjust_index_creation_statement(statement, new_table))
-            .collect::<Vec<String>>();
+            .collect::<std::result::Result<Vec<String>, String>>()
+            .map_err(sqlite3_ext::Error::Module)?;
 
         index_queries
             .iter()

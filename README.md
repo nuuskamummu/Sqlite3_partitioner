@@ -1,138 +1,179 @@
 <p align="center">
-
-</p>
-<p align="center">
-    <h1 align="center"></h1>
-</p>
-<p align="center">
-	<!-- local repository, no metadata badges. -->
-<p>
-<p align="center">
-		<em>Developed with the software and tools below.</em>
-</p>
-<p align="center">
-	<img src="https://img.shields.io/badge/Rust-000000.svg?style=default&logo=Rust&logoColor=white" alt="Rust">
-   <img src ="https://img.shields.io/badge/SQLite3-003B57.svg?style=flat&logo=SQLite&logoColor=white" alt="SQLite3"
-
+  <img src="https://img.shields.io/badge/Rust-000000.svg?style=default&logo=Rust&logoColor=white" alt="Rust">
+  <img src="https://img.shields.io/badge/SQLite3-003B57.svg?style=flat&logo=SQLite&logoColor=white" alt="SQLite3">
 </p>
 
+# sqlite3-partitioner
 
+A SQLite extension for time-series partitioning, written in Rust. It exposes a
+virtual table that transparently splits your data into separate physical tables —
+one per time window — so inserts stay fast, retention is a cheap `DROP TABLE`,
+and time-ranged queries only ever touch the partitions that matter.
 
-##  Overview
+Think of it as declarative partitioning for SQLite: you get partition pruning,
+per-partition indexes, fast counts, and expiry-based cleanup, while your
+application keeps talking to one ordinary-looking table.
 
-The sqlite3-partitioner project is designed to enhance SQLite databases by introducing efficient data partitioning capabilities. Right now, only timeseries partitioning is supported. I hope to make other partitioning methods available in the future.
-More information at https://nuuskamummu.github.io/Sqlite3_partitioner/
+## Why partition?
 
+A monolithic time-series table degrades as it grows: every insert maintains
+ever-larger b-trees (one per index), and deleting old data is an
+O(rows × indexes) operation that fragments the file. With partitioning:
 
-
+- **Inserts stay flat.** Each partition has its own small b-trees; only the
+  current partition is hot. Benchmarks: up to **34× faster** ingest on
+  disk-backed databases (10M rows; see
+  [benchmark-results/REPORT.md](benchmark-results/REPORT.md)).
+- **Retention is O(1).** Dropping an expired partition is milliseconds,
+  regardless of row count — versus a ranged `DELETE` that scales linearly and
+  churns every index.
+- **Range queries prune.** A `WHERE ts >= ... AND ts < ...` predicate skips
+  partitions outside the window entirely, and `ORDER BY ts` is served from
+  partition order with no external sort.
 
 ## Installation
 
-Download the .so/.dylib from https://github.com/nuuskamummu/Sqlite3_partitioner/releases 
+Download the pre-built extension from
+[Releases](https://github.com/nuuskamummu/Sqlite3_partitioner/releases):
 
-** partitioner-aarch64-apple-darwin.dylib
-** partitioner-x86_64-unknown-linux-gnu.so
-** no windows support yet, sorry!
+- `partitioner-aarch64-apple-darwin.dylib`
+- `partitioner-x86_64-unknown-linux-gnu.so`
+- `partitioner-x86_64-pc-windows-msvc.dll`
 
+Load it in the SQLite CLI:
 
-> Start the SQLite3 command-line (needs to be compiled with the .load function). Or load into your application using a suitable driver
-> ** macOS
-> ```console
-> $ .load PATH-DOWNLOADED-FILE/partitioner-aarch64-apple-darwin
-> ```
-> ** Linux
-> ```console
-> $ .load PATH-DOWNLOADED-FILE/partitioner-x86_64-unknown-linux-gnu
-> ```
+```sql
+-- macOS
+.load PATH/partitioner-aarch64-apple-darwin
 
----
+-- Linux
+.load PATH/partitioner-x86_64-unknown-linux-gnu
 
-###  Usage
+-- Windows
+.load PATH/partitioner-x86_64-pc-windows-msvc
+```
 
-## Create
-Use the CREATE VIRTUAL TABLE SQL command to define a new virtual table using the partitioner. Specify the partitioning interval (e.g., 1 hour) and the column arguments. Mark one column as the "partition_column," which will be used to determine the partitioning. This column should have the data type timestamp, but it will be stored as TEXT.
-> ```console
-> $ CREATE VIRTUAL TABLE test USING partitioner(
->    1 hour, 
->    col1 timestamp partition_column, 
->    col2 varchar
-> );
-> ```
-Currently, the accepted interval formats are [integer] [hour] or [integer] [day]
+Or from your application via `sqlite3_load_extension()`.
 
-## Insert
+## Usage
 
-> ```console
-> $ INSERT INTO test (col1, col2) VALUES ('2023-01-01 01:30:00', 'Sample Data');
+Create a partitioned table:
 
-## Indexing
-Indexing are not supported by the Sqlite API, but a workaround exists. Visit https://nuuskamummu.github.io/Sqlite3_partitioner/usage/ for more information
+```sql
+CREATE VIRTUAL TABLE events USING partitioner(
+    1 hour,                              -- partition interval
+    ts timestamp partition_column,       -- the partition column
+    device_id text,
+    value real
+);
+```
 
+Accepted intervals are `[integer] hour` and `[integer] day`. From here on,
+`events` behaves like a normal table — insert, select, update, delete:
 
-##  Project Roadmap
+```sql
+INSERT INTO events (ts, device_id, value) VALUES ('2026-08-15 13:30', 'pump-7', 41.2);
+```
+
+Rows are routed to the right partition automatically; partitions are created
+on demand. Inserts are buffered and flushed as multi-row batches (batch size
+compile-time configurable via `PARTITIONER_INSERT_BATCH_SIZE`, default 1000).
+
+### Indexing
+
+The partition column is indexed automatically on every partition. To add
+secondary indexes, create them on the `<name>_template` table — every partition
+created afterwards inherits them:
+
+```sql
+CREATE INDEX events_device_idx ON events_template(device_id);
+```
+
+(Partitions created before the index do not get it retroactively.)
+
+### Fast partition counts
+
+`partitioner_count_between(table, start, end)` answers "how many rows in this
+time range" from per-partition statistics, without scanning rows:
+
+```sql
+SELECT partitioner_count_between('events', '2026-08-01', '2026-08-15');
+```
+
+Sub-millisecond at any table size, as long as the bounds align to partition
+boundaries.
+
+### Retention and cleanup
+
+Give the table a `lifetime` and each partition records when it expires:
+
+```sql
+CREATE VIRTUAL TABLE events USING partitioner(
+    1 day,
+    lifetime 31 day,
+    ts timestamp partition_column,
+    payload text
+);
+```
+
+Then prune expired partitions explicitly — you control when the write lock is
+taken:
+
+```sql
+SELECT partitioner_cleanup('events');  -- drops expired partitions, returns count dropped
+```
+
+Run it from cron, a timer, or your application's maintenance window. Nothing
+runs on a schedule by itself; the extension only acts when called.
+
+## How it works
+
+For each partitioned table the extension maintains four shadow tables:
+
+- `<name>_template` — the schema blueprint; new partitions are copied from it
+  (including indexes).
+- `<name>_lookup` — maps partition start epoch → partition table name, plus the
+  expiry timestamp.
+- `<name>_root` — table configuration (partition column, interval, lifetime).
+- `<name>_stats` — per-partition row counts backing `partitioner_count_between`
+  and the query planner's cost estimates.
+
+At query time the virtual table's planner hook translates predicates on the
+partition column into a partition range, scans only those partitions, and tells
+SQLite which constraints it has already enforced. Partitions are disjoint,
+ordered ranges of the partition column, so `ORDER BY <partition column>` is
+answered by scanning partitions in order — no temp b-tree.
+
+More detail at https://nuuskamummu.github.io/Sqlite3_partitioner/ and in
+[benchmark-results/REPORT.md](benchmark-results/REPORT.md).
+
+## Building from source
+
+```bash
+cargo build --release
+# target/release/libpartitioner.{dylib,so} or partitioner.dll
+```
+
+Tests: `cargo test`. Benchmarks (ignored by default):
+`cargo test --release -- --ignored --nocapture`; see
+[benchmark-results/run_campaign.sh](benchmark-results/run_campaign.sh) for
+workload and storage-mode knobs.
 
 ## Known limitations
-The library is experimental and not recommended for production use without further development and testing.
-The datetime parser may not handle all formats correctly; review and test thoroughly with your data.
-Currently, all shadow tables are visible, and altering them can lead to undefined behavior. Plans to hide shadow tables are underway
 
----
+- Experimental; not recommended for production without further testing.
+- The datetime parser may not handle all formats (ISO `YYYY-MM-DD [HH:MM[:SS]]`
+  is the safe path).
+- Ad-hoc queries that don't constrain the partition column can be slower than a
+  plain table (virtual table dispatch overhead) — partitioning pays off on
+  ingest, retention, and time-ranged access patterns.
+- Shadow tables are visible in the schema; altering them directly is undefined
+  behavior.
 
-##  Contributing
+## License
 
-Contributions are welcome! Here are several ways you can contribute:
+Apache 2.0. See [LICENSE](LICENSE).
 
-- **[Report Issues](https://local//issues)**: Submit bugs found or log feature requests for the `` project.
-- **[Submit Pull Requests](https://local//blob/main/CONTRIBUTING.md)**: Review open PRs, and submit your own PRs.
-- **[Join the Discussions](https://local//discussions)**: Share your insights, provide feedback, or ask questions.
+## Acknowledgments
 
-<details closed>
-<summary>Contributing Guidelines</summary>
-
-1. **Fork the Repository**: Start by forking the project repository to your local account.
-2. **Clone Locally**: Clone the forked repository to your local machine using a git client.
-   ```sh
-   git clone https://github.com/nuuskamummu/Sqlite3_partitioner
-   ```
-3. **Create a New Branch**: Always work on a new branch, giving it a descriptive name.
-   ```sh
-   git checkout -b new-feature-x
-   ```
-4. **Make Your Changes**: Develop and test your changes locally.
-5. **Commit Your Changes**: Commit with a clear message describing your updates.
-   ```sh
-   git commit -m 'Implemented new feature x.'
-   ```
-6. **Push to local**: Push the changes to your forked repository.
-   ```sh
-   git push origin new-feature-x
-   ```
-7. **Submit a Pull Request**: Create a PR against the original project repository. Clearly describe the changes and their motivations.
-8. **Review**: Once your PR is reviewed and approved, it will be merged into the main branch. Congratulations on your contribution!
-</details>
-
-<details closed>
-<summary>Contributor Graph</summary>
-<br>
-<p align="center">
-   <a href="https://local{//}graphs/contributors">
-      <img src="https://contrib.rocks/image?repo=">
-   </a>
-</p>
-</details>
-
----
-
-##  License
-
-This project is protected under the Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0) License. For more details, refer to the LICENSE file.
-
----
-
-##  Acknowledgments
-* https://github.com/CGamesPlay/sqlite3_ext
-
-[**Back to the top**](#-overview)
-
----
-
+- https://github.com/CGamesPlay/sqlite3_ext

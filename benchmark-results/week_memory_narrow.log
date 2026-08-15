@@ -1,0 +1,33 @@
+warning: unused import: `std::collections::HashMap`
+ --> src/vtab_interface/vtab_module.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sqlite3-partitioner` (lib test) generated 1 warning (run `cargo fix --lib -p sqlite3-partitioner --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running unittests src/lib.rs (target/release/build/sqlite3-partitioner/baf2c170d7a1713f/out/partitioner-baf2c170d7a1713f)
+
+running 4 tests
+loaded 1000 rows/minute for 10080 minutes (10080000 total rows) in 37.97355275s
+partitioned count=120000 duration=15.216792ms
+partitioner_count_between count=120000 duration=392.333µs
+plain count=120000 duration=3.078833ms
+test benchmarks::benchmark_partitioned_vs_plain ... ok
+latest-rows benchmark on 1000 rows/minute for 10080 minutes (10080000 total rows) [memory]
+partitioned ORDER BY col1 DESC LIMIT 1000 duration=1.498583ms
+plain ORDER BY col1 DESC LIMIT 1000 duration=103.25µs
+unindexed-filter benchmark on 1000 rows/minute for 10080 minutes (10080000 total rows) [memory]
+partitioned count=7000 duration=9.384958ms
+plain count=7000 duration=8.842042ms
+test benchmarks::benchmark_latest_rows_order_by ... ok
+test benchmarks::benchmark_partitioned_vs_plain_unindexed_filter ... ok
+insert benchmark on 1000 rows/minute for 10080 minutes (10080000 total rows) [memory]
+partitioned insert duration=22.43085675s
+plain insert duration=29.064475167s
+test benchmarks::benchmark_insert_partitioned_vs_plain ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 52.51s
+

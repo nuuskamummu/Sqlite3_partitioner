@@ -1,0 +1,21 @@
+   Compiling sqlite3-partitioner v0.1.0-alpha (/Users/tom/Projects/sqlite3_partitioner)
+    Finished `release` profile [optimized] target(s) in 25.16s
+     Running unittests src/lib.rs (target/release/build/sqlite3-partitioner/baf2c170d7a1713f/out/partitioner-baf2c170d7a1713f)
+
+running 3 tests
+latest-rows benchmark on 1000 rows/minute for 10080 minutes (10080000 total rows) [disk]
+partitioned ORDER BY col1 DESC LIMIT 1000 duration=1.424708ms
+plain ORDER BY col1 DESC LIMIT 1000 duration=126.625µs
+test benchmarks::benchmark_latest_rows_order_by ... ok
+unindexed-filter benchmark on 1000 rows/minute for 10080 minutes (10080000 total rows) [disk]
+partitioned count=7000 duration=111.2025ms
+plain count=7000 duration=64.370208ms
+test benchmarks::benchmark_partitioned_vs_plain_unindexed_filter ... ok
+loaded 1000 rows/minute for 10080 minutes (10080000 total rows) in 35.491812083s
+partitioned count=120000 duration=85.009541ms
+partitioner_count_between count=120000 duration=451.375µs
+plain count=120000 duration=35.527042ms
+test benchmarks::benchmark_partitioned_vs_plain ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 35.62s
+
