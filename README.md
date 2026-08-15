@@ -5,7 +5,7 @@
 
 # sqlite3-partitioner
 
-A SQLite extension for time-series partitioning, written in Rust. It exposes a
+A SQLite extension for time-series partitioning. It exposes a
 virtual table that transparently splits your data into separate physical tables —
 one per time window — so inserts stay fast, retention is a cheap `DROP TABLE`,
 and time-ranged queries only ever touch the partitions that matter.
