@@ -3,12 +3,14 @@ pub mod lookup_table;
 pub mod operations;
 mod partition_interface;
 pub mod root_table;
+pub mod stats_table;
 pub mod template_table;
 pub use lookup_table::*;
-pub use partition_interface::partition::Partition;
+pub use partition_interface::partition::{Partition, PartitionQuery};
 
 pub use root_table::*;
 use sqlite3_ext::ValueType;
+pub use stats_table::*;
 pub use template_table::*;
 
 use crate::{error::TableError, ColumnDeclaration, ColumnDeclarations};

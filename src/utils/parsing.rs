@@ -1,8 +1,4 @@
-use std::{
-    cmp::{max, min},
-    collections::HashMap,
-    i64,
-};
+use std::{cmp::max, collections::HashMap, i64};
 
 use chrono::{NaiveDate, NaiveDateTime};
 use regex::Regex;
@@ -116,7 +112,15 @@ fn parse_datetime_to_epoch(datetime_str: &str) -> sqlite3_ext::Result<i64> {
         // Attempt to parse as NaiveDate if NaiveDateTime parsing fails
         if let Ok(date) = NaiveDate::parse_from_str(datetime_str, trimmed_format) {
             // Assuming start of the day for date-only entries
-            let datetime = date.and_hms_opt(0, 0, 0).unwrap();
+            let datetime = date.and_hms_opt(0, 0, 0).ok_or_else(|| {
+                sqlite3_ext::Error::Sqlite(
+                    SQLITE_FORMAT,
+                    Some(format!(
+                        "Could not construct start-of-day datetime for '{}'.",
+                        datetime_str
+                    )),
+                )
+            })?;
             return Ok(datetime.and_utc().timestamp());
         }
     }
@@ -174,7 +178,6 @@ pub fn parse_interval(interval_str: &str) -> Result<i64, TableError> {
     let re = Regex::new(r"(\d+)\s+(\w+)")
         .map_err(|_| TableError::ParseInterval("Failed to compile regex pattern.".to_string()))?;
 
-    println!("lifetime str {:#?}", interval_str);
     // Attempt to find matches in the input string
     let captures = re.captures(interval_str).ok_or(TableError::ParseInterval(
         "Interval format is not valid.".to_string(),
@@ -208,7 +211,6 @@ pub fn parse_interval(interval_str: &str) -> Result<i64, TableError> {
     let size_in_seconds = interval_unit_to_size.get(unit_part).ok_or_else(|| {
         TableError::ParseInterval(format!("Unsupported interval unit: '{}'.", unit_part))
     })?;
-    println!("returns {:#?}", numeric_value * size_in_seconds);
     Ok(numeric_value * size_in_seconds)
 }
 
@@ -225,21 +227,21 @@ use std::ops::Bound::{self, *};
 pub fn aggregate_conditions_to_ranges<'a>(
     conditions: &'a [Condition<'a>],
     interval: i64,
-) -> HashMap<&'a str, (Bound<i64>, Bound<i64>)> {
+) -> sqlite3_ext::Result<HashMap<&'a str, (Bound<i64>, Bound<i64>)>> {
     let mut ranges: HashMap<&'a str, (Bound<i64>, Bound<i64>)> = HashMap::new();
     for condition in conditions {
-        let partition_start = parse_partition_value(condition.value, interval).unwrap(); //TODO handle
-                                                                                         //error
+        let epoch = parse_to_unix_epoch(condition.value)?;
+        let partition_start = epoch - epoch.rem_euclid(interval);
 
         ranges
             .entry(condition.column)
             .and_modify(|e| {
-                update_bound(e, condition.operator, partition_start, interval);
+                update_bound(e, condition.operator, epoch, partition_start, interval);
             })
-            .or_insert_with(|| initial_bound(condition.operator, partition_start, interval));
+            .or_insert_with(|| initial_bound(condition.operator, epoch, partition_start, interval));
     }
 
-    ranges
+    Ok(ranges)
 }
 
 /// Updates the range boundaries based on the provided operator and value.
@@ -259,24 +261,30 @@ pub fn aggregate_conditions_to_ranges<'a>(
 fn update_bound(
     range: &mut (Bound<i64>, Bound<i64>),
     operator: &ConstraintOp,
-    value: i64,
+    epoch: i64,
+    partition_start: i64,
     interval: i64,
 ) {
+    let is_exact_boundary = epoch.rem_euclid(interval) == 0;
     match operator {
         ConstraintOp::GT | ConstraintOp::GE => {
-            let lower_bound = Excluded(value);
-            range.0 = less_restrictive_bound(range.0, lower_bound);
+            let lower_bound = Included(partition_start);
+            range.0 = more_restrictive_bound(range.0, lower_bound);
         }
         ConstraintOp::LT => {
-            let upper_bound = Excluded(value + interval);
+            let upper_bound = if is_exact_boundary {
+                Excluded(partition_start)
+            } else {
+                Included(partition_start)
+            };
             range.1 = more_restrictive_bound(range.1, upper_bound);
         }
         ConstraintOp::LE => {
-            let upper_bound = Included(value + interval);
+            let upper_bound = Included(partition_start);
             range.1 = more_restrictive_bound(range.1, upper_bound);
         }
         ConstraintOp::Eq => {
-            let bound = Included(value);
+            let bound = Included(partition_start);
             range.0 = more_restrictive_bound(range.0, bound);
             range.1 = more_restrictive_bound(range.1, bound);
         }
@@ -297,38 +305,28 @@ fn update_bound(
 ///
 /// Returns:
 /// - A tuple representing the initial range (lower and upper bounds) based on the operator and value.
-fn initial_bound(operator: &ConstraintOp, value: i64, interval: i64) -> (Bound<i64>, Bound<i64>) {
+fn initial_bound(
+    operator: &ConstraintOp,
+    epoch: i64,
+    partition_start: i64,
+    interval: i64,
+) -> (Bound<i64>, Bound<i64>) {
+    let is_exact_boundary = epoch.rem_euclid(interval) == 0;
     match operator {
-        ConstraintOp::GT | ConstraintOp::GE => (Excluded(value), Unbounded),
-        ConstraintOp::LT => (Unbounded, Excluded(value + interval)),
-        ConstraintOp::LE => (Unbounded, Included(value + interval)),
-        ConstraintOp::Eq => (Included(value), Included(value)),
+        ConstraintOp::GT | ConstraintOp::GE => (Included(partition_start), Unbounded),
+        ConstraintOp::LT => (
+            Unbounded,
+            if is_exact_boundary {
+                Excluded(partition_start)
+            } else {
+                Included(partition_start)
+            },
+        ),
+        ConstraintOp::LE => (Unbounded, Included(partition_start)),
+        ConstraintOp::Eq => (Included(partition_start), Included(partition_start)),
         _ => (Unbounded, Unbounded), // Default case
     }
 }
-/// Chooses the less restrictive (broader) of two bounds.
-///
-/// Parameters:
-/// - `a`: The first bound to compare.
-/// - `b`: The second bound to compare.
-///
-/// Returns:
-/// - The less restrictive bound.
-fn less_restrictive_bound(a: Bound<i64>, b: Bound<i64>) -> Bound<i64> {
-    match (a, b) {
-        (Unbounded, _) | (_, Unbounded) => Unbounded,
-        (Included(a_val), Included(b_val)) => Included(min(a_val, b_val)),
-        (Excluded(a_val), Excluded(b_val)) => Excluded(min(a_val, b_val)),
-        (Excluded(a_val), Included(b_val)) | (Included(a_val), Excluded(b_val)) => {
-            if a_val <= b_val {
-                Included(min(a_val, b_val))
-            } else {
-                Excluded(min(a_val, b_val))
-            }
-        }
-    }
-}
-
 /// Chooses the more restrictive (narrower) of two bounds.
 ///
 /// Parameters:

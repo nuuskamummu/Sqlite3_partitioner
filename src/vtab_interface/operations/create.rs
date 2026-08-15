@@ -1,7 +1,4 @@
-use std::borrow::Borrow;
-
 use crate::error::TableError;
-use crate::expiration::LifetimeColumn;
 use crate::shadow_tables::interface::VirtualTable;
 use crate::shadow_tables::PartitionValue;
 use crate::utils::parse_interval;
@@ -10,6 +7,71 @@ use crate::ColumnDeclarations;
 use crate::PartitionColumn;
 use sqlite3_ext::Connection;
 extern crate sqlite3_ext;
+
+#[derive(Debug)]
+struct TableOptions {
+    interval: i64,
+    lifetime: Option<i64>,
+}
+
+#[derive(Debug)]
+struct CreateTableSpec {
+    options: TableOptions,
+    columns: ColumnDeclarations,
+    partition_column: ColumnDeclaration,
+}
+
+fn parse_lifetime_option(arg: &str) -> Result<Option<i64>, TableError> {
+    let tokens: Vec<&str> = arg.split_whitespace().collect();
+    if tokens.first().map(|token| token.to_lowercase()) != Some("lifetime".to_string()) {
+        return Ok(None);
+    }
+    if tokens.len() != 3 {
+        return Err(TableError::ColumnDeclaration(format!(
+            "Invalid lifetime option: {}. Expected format 'lifetime <integer> <unit>'",
+            arg
+        )));
+    }
+    Ok(Some(parse_interval(&format!(
+        "{} {}",
+        tokens[1], tokens[2]
+    ))?))
+}
+
+fn parse_create_table_spec(args: &[&str]) -> Result<CreateTableSpec, TableError> {
+    let interval = parse_interval(args[3])?;
+    let mut columns = Vec::new();
+    let mut lifetime = None;
+
+    for arg in &args[4..] {
+        if let Some(parsed_lifetime) = parse_lifetime_option(arg)? {
+            if lifetime.is_some() {
+                return Err(TableError::ColumnDeclaration(
+                    "Only one lifetime option can be specified.".to_string(),
+                ));
+            }
+            lifetime = Some(parsed_lifetime);
+            continue;
+        }
+
+        columns.push(ColumnDeclaration::try_from(*arg)?);
+    }
+
+    let columns = ColumnDeclarations(columns);
+    let partition_column = match PartitionColumn::from_iter(columns.clone()).column_def() {
+        Some(col) => Ok(col.clone()),
+        None => Err(sqlite3_ext::Error::Module(
+            "Could not find column with identifier partition_column.".into(),
+        )),
+    }?;
+    PartitionValue::try_from(partition_column.data_type())?;
+
+    Ok(CreateTableSpec {
+        options: TableOptions { interval, lifetime },
+        columns,
+        partition_column,
+    })
+}
 
 /// Connects to an existing virtual table by name.
 ///
@@ -51,41 +113,65 @@ pub fn create_virtual_table<'a>(
     let _module = args[0];
     let _database_name = args[1];
     let table_name = args[2];
-    let interval_col = args[3];
-    let column_args = &args[4..];
-    let mut columns: ColumnDeclarations = ColumnDeclarations::from_iter(column_args);
-    let mut lifetime_column_index: Option<usize> = None;
-    for (index, column) in columns.0.iter().enumerate() {
-        if column.is_lifetime_column() {
-            lifetime_column_index = Some(index);
-            println!("lifetime column: {:#?}", index);
-
-            break;
-        }
-    }
-    let lifetime_column: Option<LifetimeColumn> = match lifetime_column_index {
-        Some(index) => Some(columns.0.remove(index)),
-        None => None,
-    };
-    // columns.0.remove(index)
-    let interval = parse_interval(interval_col)?;
-    let lifetime: Option<i64> = lifetime_column.and_then(|column| column.default_value());
-    let partition_column: ColumnDeclaration =
-        match PartitionColumn::from_iter(columns.clone()).column_def() {
-            Some(col) => Ok(col),
-            None => Err(sqlite3_ext::Error::Module(
-                "Could not find column with identifier partition_column.".into(),
-            )),
-        }?
-        .clone();
-    PartitionValue::try_from(partition_column.data_type())?;
+    let spec = parse_create_table_spec(args)?;
 
     Ok(VirtualTable::create(
         db,
         table_name,
-        columns,
-        partition_column.get_name().to_string(),
-        interval,
-        lifetime,
+        spec.columns,
+        spec.partition_column.get_name().to_string(),
+        spec.options.interval,
+        spec.options.lifetime,
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_create_table_spec, parse_lifetime_option};
+
+    #[test]
+    fn test_parse_lifetime_option() {
+        assert_eq!(
+            parse_lifetime_option("lifetime 1 day").unwrap(),
+            Some(86_400)
+        );
+        assert_eq!(parse_lifetime_option("col1 text").unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_create_table_spec_separates_options_from_columns() {
+        let spec = parse_create_table_spec(&[
+            "partitioner",
+            "main",
+            "test",
+            "1 hour",
+            "col1 timestamp partition_column",
+            "col2 text",
+            "lifetime 1 day",
+        ])
+        .unwrap();
+
+        assert_eq!(spec.options.interval, 3_600);
+        assert_eq!(spec.options.lifetime, Some(86_400));
+        assert_eq!(spec.columns.0.len(), 2);
+        assert_eq!(spec.partition_column.get_name(), "col1");
+    }
+
+    #[test]
+    fn test_parse_create_table_spec_rejects_duplicate_lifetime() {
+        let err = parse_create_table_spec(&[
+            "partitioner",
+            "main",
+            "test",
+            "1 hour",
+            "col1 timestamp partition_column",
+            "lifetime 1 day",
+            "lifetime 2 day",
+        ])
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("Only one lifetime option can be specified."));
+    }
 }

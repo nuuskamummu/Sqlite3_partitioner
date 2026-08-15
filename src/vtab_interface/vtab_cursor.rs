@@ -4,8 +4,8 @@ use std::ops::{Bound, Deref, Index};
 use std::usize;
 
 use super::PartitionMetaTable;
-use crate::constraints::{Conditions, WhereClauses};
-use crate::shadow_tables::Partition;
+use crate::constraints::{Conditions, ScanPlan, SortDirection, WhereClauses};
+use crate::shadow_tables::{Partition, PartitionQuery};
 use crate::utils::aggregate_conditions_to_ranges;
 use sqlite3_ext::query::QueryResult;
 use sqlite3_ext::vtab::ColumnContext;
@@ -130,47 +130,60 @@ impl<'vtab> RangePartitionCursor<'vtab> {
         &mut self,
         partition_conditions: Option<&'b Conditions<'b>>,
         lookup_conditions: Option<&'b Conditions<'b>>,
+        partition_order: Option<SortDirection>,
     ) -> ExtResult<std::vec::IntoIter<Partition>> {
         let ranges = lookup_conditions
             .zip(Some(self.meta_table.interface.partition_interval()))
             .map(|(conditions, interval)| {
                 aggregate_conditions_to_ranges(conditions.as_slice(), interval)
             })
+            .transpose()?
             .unwrap_or_default();
 
         let (lower_bound, upper_bound) = ranges
             .get("partition_value")
             .unwrap_or(&(Bound::Unbounded, Bound::Unbounded));
 
-        let prepared_partitions: ExtResult<Vec<Partition>> = self
-            .borrow_mut()
-            .get_partitions_to_query(lower_bound, upper_bound)?
-            .iter()
-            .try_fold(
-                Vec::new(),
-                |mut accumulator, (_partition_value, partition_name)| {
-                    let partition: Partition = Partition::try_from((
-                        self.meta_table.connection,
-                        partition_name.as_str(),
-                        partition_conditions,
-                    ))?;
-                    accumulator.push(partition);
-                    Ok(accumulator)
-                },
-            );
+        let mut partitions_in_range = self.get_partitions_to_query(lower_bound, upper_bound)?;
+        if partition_order == Some(SortDirection::Desc) {
+            partitions_in_range.reverse();
+        }
+        let order_column = partition_order
+            .map(|direction| (self.meta_table.interface.partition_column_name(), direction));
+        let prepared_partitions: ExtResult<Vec<Partition>> = partitions_in_range.iter().try_fold(
+            Vec::new(),
+            |mut accumulator, (_partition_value, partition_name)| {
+                let partition: Partition = Partition::try_from(PartitionQuery {
+                    db: self.meta_table.connection,
+                    partition_name: partition_name.as_str(),
+                    conditions: partition_conditions,
+                    order: order_column,
+                })?;
+                accumulator.push(partition);
+                Ok(accumulator)
+            },
+        );
         let prepared_partitions = prepared_partitions?;
 
         let mut partition_iter = prepared_partitions.into_iter();
         self.current_partition = partition_iter.next();
-        self.current_partition
-            .as_mut()
-            .and_then(|partition| partition.next_row().transpose());
+        // Skip partitions whose filtered query yields no rows; leaving an exhausted
+        // partition as current would surface a phantom row to SQLite.
+        while let Some(partition) = self.current_partition.as_mut() {
+            if partition.next_row()?.is_some() {
+                break;
+            }
+            self.current_partition = partition_iter.next();
+        }
+        if self.current_partition.is_none() {
+            self.eof = true;
+        }
 
         Ok(partition_iter)
     }
 }
 
-impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
+impl<'vtab> VTabCursor for RangePartitionCursor<'vtab> {
     /// Filters rows in the current cursor based on the provided WHERE clause conditions.
     ///
     /// This method prepares the cursor for row iteration by querying partitions based on
@@ -191,9 +204,16 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
         idx_str: Option<&str>,
         args: &mut [&mut ValueRef],
     ) -> ExtResult<()> {
-        let where_clauses_serialized = idx_str.unwrap_or("");
-        let where_clauses: WhereClauses =
-            ron::from_str(where_clauses_serialized).unwrap_or(WhereClauses(HashMap::default()));
+        self.meta_table.interface.flush_all()?;
+        self.eof = false;
+        let scan_plan_serialized = idx_str.unwrap_or("");
+        let scan_plan: ScanPlan = if scan_plan_serialized.is_empty() {
+            ScanPlan::new(WhereClauses(HashMap::default()), None)
+        } else {
+            ron::from_str(scan_plan_serialized)
+                .map_err(|err| sqlite3_ext::Error::Module(err.to_string()))?
+        };
+        let where_clauses = scan_plan.where_clauses;
         let lookup_conditions: Option<Conditions> = where_clauses
             .get("lookup_table")
             .map(|where_clauses| Conditions::try_from((where_clauses, args.deref())))
@@ -206,8 +226,11 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
             .transpose()
             .map_err(|err| sqlite3_ext::Error::Module(err.to_string()))?;
 
-        self.prepared_partitions =
-            self.initialize_partitions(partition_conditions.as_ref(), lookup_conditions.as_ref())?;
+        self.prepared_partitions = self.initialize_partitions(
+            partition_conditions.as_ref(),
+            lookup_conditions.as_ref(),
+            scan_plan.partition_order,
+        )?;
 
         Ok(())
     }
@@ -220,21 +243,17 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
     ///
     /// A `Result<(), Error>` indicating the success or failure of advancing the cursor.
     fn next(&mut self) -> ExtResult<()> {
-        // Attempt to advance to the next row within the current partition.
-        // If there's no next row (None is returned), attempt to move to the next partition.
-        let did_advance = match self.advance_to_next_row()? {
-            Some(_) => true,
-            None => match self.advance_to_next_partition() {
-                Some(_) => self.advance_to_next_row()?.is_some(),
-                None => false,
-            },
-        };
-        if did_advance {
-            self.internal_rowid_counter += 1;
-        } else {
-            self.eof = true;
+        // Advance row-by-row, skipping partitions whose filtered query yields no rows.
+        loop {
+            if self.advance_to_next_row()?.is_some() {
+                self.internal_rowid_counter += 1;
+                return Ok(());
+            }
+            if self.advance_to_next_partition().is_none() {
+                self.eof = true;
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
     /// Checks if the cursor has reached the end of available rows.
@@ -242,7 +261,7 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
     /// # Returns
     ///
     /// `true` if there are no more rows to iterate over, otherwise `false`.
-    fn eof(&self) -> bool {
+    fn eof(&mut self) -> bool {
         self.eof
     }
     /// Retrieves the value of the column at the specified index in the current row.
@@ -255,7 +274,7 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
     /// # Returns
     ///
     /// A `Result<(), Error>` indicating the success or failure of the column retrieval operation.
-    fn column(&self, idx: usize, c: &ColumnContext) -> ExtResult<()> {
+    fn column(&mut self, idx: usize, c: &ColumnContext) -> ExtResult<()> {
         if let Some(current_row) = self.get_current_row() {
             c.set_result(current_row.index(idx + 1).as_ref())?
         };
@@ -267,7 +286,7 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
     ///
     /// # Returns
     /// The row ID or an error if it cannot be retrieved.
-    fn rowid(&self) -> ExtResult<i64> {
+    fn rowid(&mut self) -> ExtResult<i64> {
         let rowid_column = self.get_current_row().map(|row| row.index(0));
         let partition_name = match self.get_current_partition() {
             Some(partition) => partition.get_name(),
@@ -282,11 +301,15 @@ impl<'vtab> VTabCursor<'vtab> for RangePartitionCursor<'vtab> {
             let mut rowid_mapper = self.meta_table.rowid_mapper.write().map_err(|e| {
                 sqlite3_ext::Error::Sqlite(1, Some(format!("Lock acquisition failed: {}", e)))
             })?;
-
-            rowid_mapper.insert(
-                self.internal_rowid_counter,
-                (column.get_i64(), partition_name.to_string()),
-            );
+            // The internal rowid counter is sequential, so the mapper is a plain Vec
+            // indexed by counter — no hashing. Overwrite on revisit (e.g. re-filtered
+            // cursor), append otherwise.
+            let idx = self.internal_rowid_counter as usize;
+            let entry = (column.get_i64(), partition_name.to_string());
+            match rowid_mapper.get_mut(idx) {
+                Some(slot) => *slot = entry,
+                None => rowid_mapper.push(entry),
+            }
         }
 
         Ok(self.internal_rowid_counter)

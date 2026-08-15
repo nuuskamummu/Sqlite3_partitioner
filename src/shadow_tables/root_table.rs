@@ -6,15 +6,12 @@ use sqlite3_ext::FromValue;
 use sqlite3_ext::Result as ExtResult;
 use sqlite3_ext::ValueType;
 
-use crate::ColumnDeclaration;
-use crate::ColumnDeclarations;
-use crate::PartitionColumn;
-
 use super::operations::Connect;
 use super::operations::Create;
 use super::operations::Drop;
 use super::operations::SchemaDeclaration;
 use super::PartitionValue;
+use crate::ColumnDeclaration;
 
 use super::operations::Table;
 use super::PartitionType;
@@ -138,7 +135,9 @@ impl RootTable {
                     partition_column = column.get_str()?.to_owned();
                 } else if name.eq(<Self as PartitionType>::COLUMNS[1].get_name()) {
                     interval = column.get_i64();
-                } else if name.eq(<Self as PartitionType>::COLUMNS[2].get_name()) {
+                } else if name.eq(<Self as PartitionType>::COLUMNS[2].get_name())
+                    && column.value_type() != ValueType::Null
+                {
                     lifetime = Some(column.get_i64());
                 }
             }
@@ -168,11 +167,9 @@ impl RootTable {
             "INSERT INTO {} ({partition_name_column}, {partition_value_column}, {partition_lifetime_column}) VALUES (?, ?, ?);",
             self.name()
         );
-        println!("lifetime {:#?}", self.lifetime);
         db.insert(
             &sql,
-            params![self.partition_column, self.get_interval(), self.lifetime], //TODO: Fix proper expiration
-                                                                                //handling
+            params![self.partition_column, self.get_interval(), self.lifetime],
         )?;
         Ok(true)
     }
@@ -231,6 +228,7 @@ mod tests {
 
         let connected_table = RootTable::connect(connection, "test");
         assert!(connected_table.is_ok());
+        assert_eq!(connected_table.unwrap().get_lifetime(), None);
 
         // println!("{:#?}", r);
     }
@@ -247,6 +245,7 @@ mod tests {
 
         let connected_table = RootTable::connect(connection, "test");
         assert!(connected_table.is_ok());
+        assert_eq!(connected_table.unwrap().get_lifetime(), Some(3600));
 
         // println!("{:#?}", r);
     }

@@ -1,0 +1,36 @@
+warning: unused import: `std::collections::HashMap`
+ --> src/vtab_interface/vtab_module.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sqlite3-partitioner` (lib test) generated 1 warning (run `cargo fix --lib -p sqlite3-partitioner --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.12s
+     Running unittests src/lib.rs (target/release/build/sqlite3-partitioner/baf2c170d7a1713f/out/partitioner-baf2c170d7a1713f)
+
+running 4 tests
+Error: Sqlite(5, "database is locked")
+test benchmarks::benchmark_partitioned_vs_plain ... FAILED
+Error: Sqlite(5, "database is locked")
+test benchmarks::benchmark_latest_rows_order_by ... FAILED
+unindexed-filter benchmark on 1000 rows/minute for 10080 minutes (10080000 total rows) [disk]
+partitioned count=7000 duration=12.291291ms
+plain count=7000 duration=10.947959ms
+test benchmarks::benchmark_partitioned_vs_plain_unindexed_filter ... ok
+test benchmarks::benchmark_insert_partitioned_vs_plain has been running for over 60 seconds
+insert benchmark on 1000 rows/minute for 10080 minutes (10080000 total rows) [disk]
+partitioned insert duration=117.78490825s
+plain insert duration=4044.128435125s
+test benchmarks::benchmark_insert_partitioned_vs_plain ... ok
+
+failures:
+
+failures:
+    benchmarks::benchmark_latest_rows_order_by
+    benchmarks::benchmark_partitioned_vs_plain
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 54 filtered out; finished in 4164.60s
+
+error: test failed, to rerun pass `--lib`

@@ -1,7 +1,4 @@
-use crate::{
-    shadow_tables::interface::VirtualTable, utils::validation::validate_and_map_columns,
-    vtab_interface::*,
-};
+use crate::{shadow_tables::interface::VirtualTable, vtab_interface::*};
 
 /// Inserts a new row into the virtual table, distributing it into the appropriate partition
 /// based on the partition column value.
@@ -27,20 +24,15 @@ use crate::{
 /// This function is critical for ensuring that data is correctly inserted into the appropriate
 /// partition of a partitioned virtual table, adhering to the table's partitioning scheme.
 pub fn insert(interface: &VirtualTable, info: &mut ChangeInfo) -> sqlite3_ext::Result<i64> {
-    let (columns, partition_column) = validate_and_map_columns(
-        &info.args()[1..],
-        interface.columns().into(),
-        interface.partition_column_name(),
-    )?;
-    let partition_column = match partition_column {
-        Some(value) => value,
-        None => {
-            return Err(sqlite3_ext::Error::Sqlite(
+    let columns = &info.args()[1..];
+    let partition_column = columns
+        .get(interface.partition_column_index())
+        .ok_or_else(|| {
+            sqlite3_ext::Error::Sqlite(
                 SQLITE_NOTFOUND,
                 Some("Partition column not found".to_string()),
-            ))
-        }
-    };
-    let partition_value = parse_partition_value(partition_column, interface.partition_interval())?;
-    interface.insert(partition_value, columns)
+            )
+        })?;
+    let partition_value = interface.partition_value_for(partition_column)?;
+    interface.buffer_insert(partition_value, columns)
 }

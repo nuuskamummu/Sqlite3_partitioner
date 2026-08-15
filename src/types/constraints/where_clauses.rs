@@ -53,6 +53,40 @@ impl WhereClause {
 /// to various columns within a query.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct WhereClauses(pub HashMap<String, Vec<WhereClause>>);
+
+/// Sort direction for a scan ordered by the partition column.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+impl Display for SortDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SortDirection::Asc => write!(f, "ASC"),
+            SortDirection::Desc => write!(f, "DESC"),
+        }
+    }
+}
+
+/// The serialized scan plan passed from `best_index` to `xFilter` via `index_str`:
+/// the WHERE clauses to enforce plus, when SQLite's ORDER BY can be satisfied by the
+/// natural partition ordering, the direction in which to scan partitions.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ScanPlan {
+    pub where_clauses: WhereClauses,
+    pub partition_order: Option<SortDirection>,
+}
+
+impl ScanPlan {
+    pub fn new(where_clauses: WhereClauses, partition_order: Option<SortDirection>) -> Self {
+        Self {
+            where_clauses,
+            partition_order,
+        }
+    }
+}
 impl Deref for WhereClauses {
     /// Provides immutable access to the underlying `HashMap` of where clauses.
     type Target = HashMap<String, Vec<WhereClause>>;

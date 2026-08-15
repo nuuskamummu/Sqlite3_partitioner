@@ -29,24 +29,38 @@ pub fn update<'vtab>(
     partition_name: &str,
     partition: &VirtualTable,
     args: &'vtab mut [&'vtab mut ValueRef],
-) -> (String, Vec<&'vtab mut &'vtab mut ValueRef>) {
+) -> sqlite3_ext::Result<(String, Vec<&'vtab mut &'vtab mut ValueRef>)> {
     let columns = partition.columns();
     let mut return_values = Vec::new();
 
-    let (mut _new_rowid, cols) = args.split_first_mut().unwrap();
+    let (_new_rowid, cols) = args
+        .split_first_mut()
+        .ok_or_else(|| sqlite3_ext::Error::Module("Missing update arguments".to_string()))?;
     let update_clause = cols
         .iter_mut()
         .enumerate()
-        .filter_map(|(index, value)| {
+        .map(|(index, value)| {
             if value.nochange() {
-                None
+                Ok(None)
             } else {
                 return_values.push(value);
 
-                let column_name = columns.0.get(index).unwrap().get_name();
-                Some(format!("{} = ?", column_name))
+                let column_name = columns
+                    .0
+                    .get(index)
+                    .ok_or_else(|| {
+                        sqlite3_ext::Error::Module(format!(
+                            "Column index {} out of bounds for update",
+                            index
+                        ))
+                    })?
+                    .get_name();
+                Ok(Some(format!("{} = ?", column_name)))
             }
         })
+        .collect::<sqlite3_ext::Result<Vec<Option<String>>>>()?
+        .into_iter()
+        .flatten()
         .collect::<Vec<String>>()
         .join(", ");
 
@@ -54,5 +68,5 @@ pub fn update<'vtab>(
         "UPDATE {} SET {} WHERE ROWID = ?",
         partition_name, update_clause
     );
-    (sql, return_values)
+    Ok((sql, return_values))
 }
