@@ -16,21 +16,22 @@ Download the extension for your platform from
 - `partitioner-x86_64-unknown-linux-gnu.so` (Linux)
 - `partitioner-x86_64-pc-windows-msvc.dll` (Windows)
 
-Load it in the SQLite CLI (built with load-extension support):
+Load it in the SQLite CLI (built with load-extension support), passing the
+init function explicitly:
 
 ```sql
 -- macOS
-.load PATH/partitioner-aarch64-apple-darwin
+.load PATH/partitioner-aarch64-apple-darwin sqlite3_partitioner_init
 
 -- Linux
-.load PATH/partitioner-x86_64-unknown-linux-gnu
+.load PATH/partitioner-x86_64-unknown-linux-gnu sqlite3_partitioner_init
 
 -- Windows
-.load PATH/partitioner-x86_64-pc-windows-msvc
+.load PATH/partitioner-x86_64-pc-windows-msvc sqlite3_partitioner_init
 ```
 
-Or load it from your application with `sqlite3_load_extension()` through your
-driver of choice.
+Or load it from your application with `sqlite3_load_extension()` (entry point
+`sqlite3_partitioner_init`) through your driver of choice.
 
 ## From source
 
