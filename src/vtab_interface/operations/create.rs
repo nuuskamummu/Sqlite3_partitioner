@@ -1,3 +1,4 @@
+use crate::companions::CompanionDecl;
 use crate::error::TableError;
 use crate::shadow_tables::interface::VirtualTable;
 use crate::shadow_tables::PartitionValue;
@@ -12,6 +13,7 @@ extern crate sqlite3_ext;
 struct TableOptions {
     interval: i64,
     lifetime: Option<i64>,
+    companions: Vec<CompanionDecl>,
 }
 
 #[derive(Debug)]
@@ -42,6 +44,7 @@ fn parse_create_table_spec(args: &[&str]) -> Result<CreateTableSpec, TableError>
     let interval = parse_interval(args[3])?;
     let mut columns = Vec::new();
     let mut lifetime = None;
+    let mut companions: Vec<CompanionDecl> = Vec::new();
 
     for arg in &args[4..] {
         if let Some(parsed_lifetime) = parse_lifetime_option(arg)? {
@@ -51,6 +54,17 @@ fn parse_create_table_spec(args: &[&str]) -> Result<CreateTableSpec, TableError>
                 ));
             }
             lifetime = Some(parsed_lifetime);
+            continue;
+        }
+
+        if let Some(companion) = CompanionDecl::parse(arg)? {
+            if companions.iter().any(|decl| decl.name == companion.name) {
+                return Err(TableError::ColumnDeclaration(format!(
+                    "Duplicate companion name: {}",
+                    companion.name
+                )));
+            }
+            companions.push(companion);
             continue;
         }
 
@@ -67,7 +81,11 @@ fn parse_create_table_spec(args: &[&str]) -> Result<CreateTableSpec, TableError>
     PartitionValue::try_from(partition_column.data_type())?;
 
     Ok(CreateTableSpec {
-        options: TableOptions { interval, lifetime },
+        options: TableOptions {
+            interval,
+            lifetime,
+            companions,
+        },
         columns,
         partition_column,
     })
@@ -122,6 +140,7 @@ pub fn create_virtual_table<'a>(
         spec.partition_column.get_name().to_string(),
         spec.options.interval,
         spec.options.lifetime,
+        &spec.options.companions,
     )?)
 }
 

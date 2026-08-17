@@ -14,6 +14,9 @@ pub fn cleanup_expired_partitions(db: &Connection, table_name: &str) -> ExtResul
     let expired = vtab.lookup().get_expired_partitions(db, now_epoch)?;
 
     for (partition_value, partition_table_name) in &expired {
+        for companion in vtab.companions() {
+            companion.on_partition_dropped(db, table_name, *partition_value)?;
+        }
         db.execute(&format!("DROP TABLE {}", partition_table_name), ())?;
         vtab.lookup().delete_partition(db, *partition_value)?;
         vtab.stats().delete_partition(db, partition_table_name)?;

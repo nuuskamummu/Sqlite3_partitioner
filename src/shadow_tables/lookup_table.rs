@@ -466,7 +466,7 @@ mod tests {
             ColumnDeclarations::from_iter(&["col1 timestamp partition_column", "col2 text"]);
 
         let virtual_table =
-            VirtualTable::create(db, "test", declarations, "col1".to_string(), 3600, None).unwrap();
+            VirtualTable::create(db, "test", declarations, "col1".to_string(), 3600, None, &[]).unwrap();
         virtual_table
     }
     #[test]

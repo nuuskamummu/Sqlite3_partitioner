@@ -156,6 +156,43 @@ SELECT partitioner_cleanup('events');  -- drops expired partitions, returns coun
 Run it from cron, a timer, or your application's maintenance window. Nothing
 runs on a schedule by itself; the extension only acts when called.
 
+### Companions (experimental, feature-gated)
+
+A partitioned table can declare **companion shadow tables** backed by other
+SQLite extensions, kept in sync with the data partitions automatically. The
+reference implementation is vector search via
+[sqlite-vec](https://github.com/asg017/sqlite-vec) (requires building with
+`--features vec` and loading the vec0 extension):
+
+```sql
+CREATE VIRTUAL TABLE events USING partitioner(
+    1 hour,
+    lifetime 31 day,
+    ts timestamp partition_column,
+    embedding text,                                -- e.g. '[0.1, 0.2, ...]'
+    companion vec USING vec0(embedding float[384])
+);
+```
+
+This creates `events_vec`, a flat vec0 table whose rows carry `(embedding,
+epoch, prowid)` locators. Inserts, updates, and deletes on `events` stay in
+sync; `partitioner_cleanup` purges the vectors of expired partitions. Query it
+with a KNN search and resolve the locators back to rows (wrap the KNN in
+`WITH ... AS MATERIALIZED` — vec0 rejects pushed-down join constraints):
+
+```sql
+WITH knn AS MATERIALIZED (
+    SELECT epoch, prowid, distance FROM events_vec
+    WHERE embedding MATCH '[...]' AND k = 10
+    ORDER BY distance
+)
+SELECT ... -- join knn back to partitions on (epoch, prowid)
+```
+
+The mechanism is generic: companions implement a small Rust trait, and new
+companion modules can be registered without touching the core partitioning
+code.
+
 ## How it works
 
 For each partitioned table the extension maintains four shadow tables:

@@ -27,5 +27,8 @@ nav_order: 3
   partitions in order, no temp b-tree.
 - `partitioner_count_between(table, start, end)` — fast row counts over a
   time range from per-partition statistics, without scanning rows.
+- Companion shadow tables (experimental, `--features vec`): keep an external
+  virtual table — e.g. sqlite-vec `vec0` for vector search — in sync with the
+  data partitions, with automatic purge on retention cleanup.
 - Cross-platform: prebuilt extensions for macOS (arm64), Linux (x86_64), and
   Windows (x86_64).

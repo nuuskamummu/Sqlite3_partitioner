@@ -1,4 +1,5 @@
 mod cleanup;
+pub mod companions;
 mod error;
 
 #[cfg(test)]

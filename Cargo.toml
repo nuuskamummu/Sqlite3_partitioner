@@ -7,6 +7,9 @@ edition = "2021"
 name = "partitioner"
 path = "src/lib.rs"
 crate-type=["cdylib"]
+[features]
+vec = []
+
 [dependencies]
 regex = "1.10.3"
 sqlite3_ext = { git = "https://github.com/CGamesPlay/sqlite3_ext", rev = "03079ad5" }
@@ -16,7 +19,7 @@ ron = "0.8"
 sqlparser = {version = "0.44.0", features = ["serde"]}
 [dev-dependencies]
 sqlite3_ext = { git = "https://github.com/CGamesPlay/sqlite3_ext", rev = "03079ad5", features = ["with_rusqlite"] }
-rusqlite = {version = "^0.28", features = ["column_decltype", "vtab", "bundled"]}
+rusqlite = {version = "^0.28", features = ["column_decltype", "vtab", "bundled", "load_extension"]}
 cargo-llvm-cov = "0.6.7"
 
 

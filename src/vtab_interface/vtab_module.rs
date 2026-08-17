@@ -403,6 +403,18 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                         self.interface
                             .stats()
                             .decrement_row_count(self.connection, partition_name)?;
+                        if let Some(old_value) =
+                            self.interface.partition_value_of(partition_name)?
+                        {
+                            for companion in self.interface.companions() {
+                                companion.on_row_deleted(
+                                    self.connection,
+                                    &self.interface.base_name(),
+                                    old_value,
+                                    *db_rowid,
+                                )?;
+                            }
+                        }
                     } else {
                         let (sql, mut values) =
                             update(partition_name, &self.interface, info.args_mut())?;
@@ -416,6 +428,28 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
 
                         db_rowid.bind_param(stmt.borrow_mut(), (values.len() + 1) as i32)?;
                         stmt.execute(())?;
+                        // Non-moving update: replace the companion row so synced
+                        // columns (e.g. embeddings) stay current.
+                        if let Some(value) = self.interface.partition_value_of(partition_name)? {
+                            let new_cols = &info.args()[1..];
+                            let new_col_refs =
+                                new_cols.iter().map(|value| &**value).collect::<Vec<_>>();
+                            for companion in self.interface.companions() {
+                                companion.on_row_deleted(
+                                    self.connection,
+                                    &self.interface.base_name(),
+                                    value,
+                                    *db_rowid,
+                                )?;
+                                companion.on_row_inserted(
+                                    self.connection,
+                                    &self.interface.base_name(),
+                                    value,
+                                    *db_rowid,
+                                    new_col_refs.as_slice(),
+                                )?;
+                            }
+                        }
                     }
                 }
 
@@ -435,6 +469,18 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                     self.interface
                         .stats()
                         .decrement_row_count(self.connection, partition_name)?;
+                    if let Some(partition_value) =
+                        self.interface.partition_value_of(partition_name)?
+                    {
+                        for companion in self.interface.companions() {
+                            companion.on_row_deleted(
+                                self.connection,
+                                &self.interface.base_name(),
+                                partition_value,
+                                *db_rowid,
+                            )?;
+                        }
+                    }
                 }
 
                 Ok(id)

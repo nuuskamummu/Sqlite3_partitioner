@@ -4,11 +4,13 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use sqlite3_ext::query::Statement;
 use sqlite3_ext::query::ToParam;
 use sqlite3_ext::Connection;
+use sqlite3_ext::FallibleIteratorMut;
 use sqlite3_ext::FromValue;
 use sqlite3_ext::Value;
 use sqlite3_ext::ValueRef;
 use sqlite3_ext::ValueType;
 
+use crate::companions::{self, Companion, CompanionDecl};
 use crate::utils::parse_partition_value;
 use crate::ColumnDeclarations;
 use crate::LookupTable;
@@ -109,6 +111,8 @@ pub struct VirtualTable<'vtab> {
     batch_insert_statements: RefCell<std::collections::HashMap<(String, usize), Statement>>,
     /// Buffered rows waiting to be flushed in a batch.
     insert_batch: RefCell<InsertBatch>,
+    /// Companion shadow tables kept in sync with the data partitions.
+    companions: Vec<Box<dyn Companion>>,
     /// Cached index of the partition column in the declared column order.
     partition_column_index: usize,
 }
@@ -136,6 +140,10 @@ impl<'vtab> VirtualTable<'vtab> {
         let template_table = TemplateTable::connect(db, name)?;
         let partition_column_index =
             Self::find_partition_column_index(&template_table, root_table.partition_column());
+        let companions = companions::load_decls(db, name)?
+            .iter()
+            .map(|decl| companions::instantiate(decl, template_table.columns()))
+            .collect::<sqlite3_ext::Result<Vec<_>>>()?;
         let table = VirtualTable {
             connection: db,
             base_name: name.to_string(),
@@ -146,6 +154,7 @@ impl<'vtab> VirtualTable<'vtab> {
             insert_statements: RefCell::new(std::collections::HashMap::new()),
             batch_insert_statements: RefCell::new(std::collections::HashMap::new()),
             insert_batch: RefCell::new(InsertBatch::new(1000)),
+            companions,
             partition_column_index,
         };
         Ok(table)
@@ -174,6 +183,7 @@ impl<'vtab> VirtualTable<'vtab> {
         partition_column: String,
         interval: i64,
         lifetime_column: Option<i64>,
+        companion_decls: &[CompanionDecl],
     ) -> sqlite3_ext::Result<Self> {
         let root_table = RootTable::create(db, name, partition_column, interval, lifetime_column)?;
         let template_table = TemplateTable::create(db, name, column_declarations)?;
@@ -189,6 +199,19 @@ impl<'vtab> VirtualTable<'vtab> {
         db.execute(&partition_column_idx_sql, ())?;
         let partition_column_index =
             Self::find_partition_column_index(&template_table, root_table.partition_column());
+        let companions = if companion_decls.is_empty() {
+            Vec::new()
+        } else {
+            companions::create_store(db, name)?;
+            let mut companions = Vec::with_capacity(companion_decls.len());
+            for decl in companion_decls {
+                companions::store_decl(db, name, decl)?;
+                let companion = companions::instantiate(decl, template_table.columns())?;
+                db.execute(&companion.create_sql(name), ())?;
+                companions.push(companion);
+            }
+            companions
+        };
         Ok(VirtualTable {
             connection: db,
             base_name: name.to_string(),
@@ -199,6 +222,7 @@ impl<'vtab> VirtualTable<'vtab> {
             insert_statements: RefCell::new(std::collections::HashMap::new()),
             batch_insert_statements: RefCell::new(std::collections::HashMap::new()),
             insert_batch: RefCell::new(InsertBatch::new(INSERT_BATCH_SIZE)),
+            companions,
             partition_column_index,
         })
     }
@@ -222,6 +246,11 @@ impl<'vtab> VirtualTable<'vtab> {
         }
         self.lookup_table.drop_table(self.connection)?;
         self.stats_table.drop_table(self.connection)?;
+        for companion in &self.companions {
+            self.connection
+                .execute(&companion.drop_sql(&self.base_name), ())?;
+        }
+        companions::drop_store(self.connection, &self.base_name)?;
         self.root_table.drop_table(self.connection)?;
         self.template_table.drop_table(self.connection)?;
         Ok(())
@@ -333,6 +362,11 @@ impl<'vtab> VirtualTable<'vtab> {
         self.root_table.partition_column()
     }
 
+    /// Base name of the virtual table.
+    pub fn base_name(&self) -> &str {
+        &self.base_name
+    }
+
     pub fn partition_column_index(&self) -> usize {
         self.partition_column_index
     }
@@ -389,6 +423,27 @@ impl<'vtab> VirtualTable<'vtab> {
         &self.stats_table
     }
 
+    /// Companion shadow tables declared for this virtual table.
+    pub fn companions(&self) -> &[Box<dyn Companion>] {
+        &self.companions
+    }
+
+    /// Resolves a physical partition table name back to its partition value.
+    pub fn partition_value_of(&self, partition_name: &str) -> sqlite3_ext::Result<Option<i64>> {
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {} = ?",
+            self.lookup_table.partition_value_column().get_name(),
+            self.lookup_table.name(),
+            self.lookup_table.partition_table_column().get_name(),
+        );
+        let mut stmt = self.connection.prepare(&sql)?;
+        let rows = stmt.query([partition_name])?;
+        match rows.next() {
+            Ok(Some(row)) => Ok(Some(row[0].get_i64())),
+            _ => Ok(None),
+        }
+    }
+
     pub fn row_count_for_range(
         &self,
         lower_bound: &std::ops::Bound<i64>,
@@ -439,6 +494,15 @@ impl<'vtab> VirtualTable<'vtab> {
         };
         self.stats_table
             .increment_row_count(self.connection, &partition)?;
+        for companion in &self.companions {
+            companion.on_row_inserted(
+                self.connection,
+                &self.base_name,
+                partition_value,
+                rowid,
+                columns,
+            )?;
+        }
         Ok(rowid)
     }
 
@@ -556,17 +620,31 @@ impl<'vtab> VirtualTable<'vtab> {
                 .entry((partition_name.clone(), chunk.len()))
                 .or_insert(self.connection.prepare(&sql)?);
             let mut position = 1i32;
-            for PendingRow {
-                virtual_rowid: _,
-                values,
-            } in chunk
-            {
-                for value in values {
-                    value.bind_param(stmt, position)?;
+            for pending_row in &chunk {
+                for value in &pending_row.values {
+                    value.clone().bind_param(stmt, position)?;
                     position += 1;
                 }
             }
             stmt.execute(())?;
+
+            if !self.companions.is_empty() {
+                // Chunk inserts into a rowid table without explicit rowids produce
+                // consecutive rowids ending at last_insert_rowid().
+                let last_rowid: i64 = self
+                    .connection
+                    .query_row("SELECT last_insert_rowid()", (), |row| Ok(row[0].get_i64()))?;
+                let first_rowid = last_rowid - chunk.len() as i64 + 1;
+                for companion in &self.companions {
+                    companion.on_rows_flushed(
+                        self.connection,
+                        &self.base_name,
+                        partition_value,
+                        first_rowid,
+                        &chunk,
+                    )?;
+                }
+            }
         }
 
         self.stats_table
@@ -629,6 +707,7 @@ mod tests {
             partition_column_name.to_string(),
             interval,
             None,
+            &[],
         );
         assert!(table.is_ok());
         table.unwrap()
@@ -647,6 +726,7 @@ mod tests {
             partition_column_name.to_string(),
             interval,
             Some(lifetime),
+            &[],
         );
         assert!(table.is_ok());
         table.unwrap()

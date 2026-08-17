@@ -27,6 +27,10 @@ tables behind the scenes.
 - **`src/cleanup.rs`** — the `partitioner_cleanup` scalar function: drops
   expired partitions and purges their `_lookup`/`_stats` rows in one
   transaction.
+- **`src/companions`** — pluggable companion shadow tables (experimental).
+  A `Companion` trait with lifecycle hooks on flush/insert/delete/cleanup;
+  the sqlite-vec (`vec0`) implementation lives behind the `vec` Cargo
+  feature. Declarations are stored in a `<name>_companions` shadow table.
 - **`src/types`** — parsed column declarations, constraints, and WHERE-clause
   helpers.
 - **`src/utils`** — interval parsing, value-type parsing, and datetime helpers.
@@ -64,5 +68,6 @@ src/
 ├── vtab_interface/     # virtual table module and operations
 ├── benchmarks.rs       # ignored-by-default benchmark suite
 ├── cleanup.rs          # partitioner_cleanup scalar function
+├── companions/         # pluggable companion shadows (vec0 behind `vec` feature)
 └── lib.rs
 ```
