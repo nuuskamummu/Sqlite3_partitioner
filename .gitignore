@@ -15,3 +15,10 @@ target/
 
 #dev utilities
 dev-utils/
+
+# local scratch files
+/test
+/lll
+
+# code index tooling
+.cocoindex_code/
