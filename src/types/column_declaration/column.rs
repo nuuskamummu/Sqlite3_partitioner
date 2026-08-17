@@ -93,18 +93,6 @@ impl<'a> TryFrom<&'a str> for ColumnDeclaration {
     }
 }
 
-// impl<'a> TryFrom<&'a [&'a str]> for ColumnDeclaration {
-//     type Error = TableError;
-//     fn try_from(value: &'a [&'a str]) -> Result<Self, Self::Error> {
-//         let columns: String = value
-//             .iter()
-//             .map(|&col_arg| col_arg.into())
-//             .collect::<Vec<String>>()
-//             .join(" ");
-//         ColumnDeclaration::try_from(&columns)
-//     }
-// }
-
 impl Display for ColumnDeclaration {
     /// Formats the `ColumnDeclaration` for display, including its name and data type.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

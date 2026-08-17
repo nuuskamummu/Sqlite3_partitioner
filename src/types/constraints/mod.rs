@@ -74,17 +74,3 @@ impl<'a> TryFrom<(&'a Vec<WhereClause>, &'a [&'a mut ValueRef])> for Conditions<
             .collect()
     }
 }
-//Could this work? Are the iterators always of the same length?
-// impl<'a> TryFrom<(&'a Vec<WhereClause>, &'a [&'a mut ValueRef])> for Conditions<'a> {
-//     type Error = TableError;
-//     fn try_from(
-//         value: (&'a Vec<WhereClause>, &'a [&'a mut ValueRef]),
-//     ) -> Result<Self, Self::Error> {
-//         let (constraints, args) = value;
-//         constraints
-//             .iter()
-//             .zip(args.iter())
-//             .map(|(where_clause, arg)| Ok(Condition::from((where_clause, arg))))
-//             .collect()
-//     }
-// }

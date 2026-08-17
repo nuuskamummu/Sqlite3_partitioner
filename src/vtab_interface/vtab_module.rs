@@ -300,16 +300,6 @@ impl<'vtab> TransactionVTab<'vtab> for PartitionMetaTable<'vtab> {
     }
 }
 
-impl<'vtab> PartitionMetaTableTransaction<'vtab> {
-    /// Returns true when SQLite is in autocommit mode, meaning each statement is its own
-    /// transaction. In that mode we defer flushing so that many single-row inserts can be
-    /// batched together; otherwise we flush at the end of an explicit transaction.
-    #[allow(dead_code)]
-    fn in_autocommit(&self) -> bool {
-        unsafe { ffi::sqlite3_get_autocommit(self.vtab.connection.as_mut_ptr()) != 0 }
-    }
-}
-
 impl<'vtab> VTabTransaction for PartitionMetaTableTransaction<'vtab> {
     fn sync(&mut self) -> ExtResult<()> {
         if self.flush_on_commit {

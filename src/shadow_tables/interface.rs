@@ -342,11 +342,7 @@ impl<'vtab> VirtualTable<'vtab> {
     /// The SQL CREATE TABLE query string.
     pub fn create_table_query(&self) -> String {
         let mut interface_schema = self.template_table.schema().clone();
-        // let mut hidden_column =
-        //     ColumnDeclaration::new("_partition".to_string(), sqlite3_ext::ValueType::Text);
-        // hidden_column.set_hidden();
         interface_schema.name = self.base_name.clone();
-        // interface_schema.columns.0.push(hidden_column);
         interface_schema.table_query()
     }
 

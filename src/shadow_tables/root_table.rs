@@ -212,8 +212,6 @@ mod tests {
         let result = root_table.drop_table(Connection::from_rusqlite(&rusq_conn));
 
         assert!(result.is_ok());
-
-        // println!("{:#?}", r);
     }
     #[test]
     fn test_db_create_and_connect() {
@@ -229,8 +227,6 @@ mod tests {
         let connected_table = RootTable::connect(connection, "test");
         assert!(connected_table.is_ok());
         assert_eq!(connected_table.unwrap().get_lifetime(), None);
-
-        // println!("{:#?}", r);
     }
     #[test]
     fn test_db_create_and_connect_with_lifetime() {
@@ -246,8 +242,5 @@ mod tests {
         let connected_table = RootTable::connect(connection, "test");
         assert!(connected_table.is_ok());
         assert_eq!(connected_table.unwrap().get_lifetime(), Some(3600));
-
-        // println!("{:#?}", r);
     }
-    // Additional tests for `create_table`, `connect`, and `insert` could be added here
 }
