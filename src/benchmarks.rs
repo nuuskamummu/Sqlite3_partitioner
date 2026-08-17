@@ -878,6 +878,11 @@ fn benchmark_realistic_wide_table() -> sqlite3_ext::Result<()> {
 }
 
 // --- Vector companion benchmark (feature "vec", requires VEC0_EXTENSION_PATH) ---
+//
+// Measures the per-partition vec0 companion against a plain table with a
+// manually synced global vec0 index: ingest, partition-local and windowed KNN
+// (merged across the window's partitions), and retention (drop-pair vs row
+// deletes).
 
 #[cfg(feature = "vec")]
 mod vec_bench {
@@ -929,14 +934,118 @@ mod vec_bench {
         true
     }
 
-    /// Compares a plain table with a manually-synced vec0 index against a
-    /// partitioned table with an auto-synced vec companion: ingest, KNN,
-    /// time-windowed KNN (post-filter, vec0 0.1.9 rejects aux-column filters
-    /// inside KNN), and retention purge.
+    fn partitions_in_range(
+        db: &Connection,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> sqlite3_ext::Result<Vec<(i64, String)>> {
+        let sql = match (start, end) {
+            (Some(start), Some(end)) => format!(
+                "SELECT partition_value, partition_table FROM partitioned_lookup
+                 WHERE partition_value >= strftime('%s', '{start}')
+                   AND partition_value < strftime('%s', '{end}')
+                 ORDER BY partition_value"
+            ),
+            (None, None) => {
+                "SELECT partition_value, partition_table FROM partitioned_lookup ORDER BY partition_value"
+                    .to_string()
+            }
+            _ => unreachable!("partition range must have both bounds or neither"),
+        };
+        let mut stmt = db.prepare(&sql)?;
+        let rows = stmt.query(())?;
+        let mut partitions = Vec::new();
+        while let Ok(Some(row)) = rows.next() {
+            partitions.push((row[0].get_i64(), row[1].get_str()?.to_owned()));
+        }
+        Ok(partitions)
+    }
+
+    fn partition_vec_table(data_partition: &str) -> String {
+        format!("{}_vec", data_partition)
+    }
+
+    fn merged_partition_knn(
+        db: &Connection,
+        partitions: &[(i64, String)],
+        query_vector: &str,
+        k: usize,
+    ) -> sqlite3_ext::Result<Vec<(String, i64, f64)>> {
+        let mut candidates = Vec::new();
+        for (_, data_partition) in partitions {
+            let vec_partition = partition_vec_table(data_partition);
+            let mut stmt = db.prepare(&format!(
+                "SELECT rowid, distance FROM {} WHERE emb MATCH ? AND k = {} ORDER BY distance",
+                vec_partition, k
+            ))?;
+            query_vector.bind_param(&mut stmt, 1)?;
+            let rows = stmt.query(())?;
+            while let Ok(Some(row)) = rows.next() {
+                candidates.push((data_partition.clone(), row[0].get_i64(), row[1].get_f64()));
+            }
+        }
+        candidates.sort_by(|left, right| left.2.total_cmp(&right.2));
+        candidates.truncate(k);
+        Ok(candidates)
+    }
+
+    fn resolve_partition_hits(
+        db: &Connection,
+        hits: &[(String, i64, f64)],
+    ) -> sqlite3_ext::Result<usize> {
+        for (data_partition, rowid, _) in hits {
+            let _: String = db.query_row(
+                &format!("SELECT col2 FROM {} WHERE rowid = ?", data_partition),
+                [*rowid],
+                |row| Ok(row.index_mut(0).get_str()?.to_owned()),
+            )?;
+        }
+        Ok(hits.len())
+    }
+
+    fn plain_knn(
+        db: &Connection,
+        query_vector: &str,
+        k: usize,
+        window: Option<(&str, &str)>,
+    ) -> sqlite3_ext::Result<Vec<(i64, f64)>> {
+        let sql = match window {
+            Some((start, end)) => format!(
+                "SELECT rowid, distance FROM plain_vec
+                 WHERE emb MATCH ? AND k = {k}
+                   AND rowid IN (SELECT rowid FROM plain WHERE col1 >= '{start}' AND col1 < '{end}')
+                 ORDER BY distance"
+            ),
+            None => format!(
+                "SELECT rowid, distance FROM plain_vec WHERE emb MATCH ? AND k = {k} ORDER BY distance"
+            ),
+        };
+        let mut stmt = db.prepare(&sql)?;
+        query_vector.bind_param(&mut stmt, 1)?;
+        let rows = stmt.query(())?;
+        let mut hits = Vec::new();
+        while let Ok(Some(row)) = rows.next() {
+            hits.push((row[0].get_i64(), row[1].get_f64()));
+        }
+        Ok(hits)
+    }
+
+    fn resolve_plain_hits(db: &Connection, hits: &[(i64, f64)]) -> sqlite3_ext::Result<usize> {
+        for (rowid, _) in hits {
+            let _: String =
+                db.query_row("SELECT col2 FROM plain WHERE rowid = ?", [*rowid], |row| {
+                    Ok(row.index_mut(0).get_str()?.to_owned())
+                })?;
+        }
+        Ok(hits.len())
+    }
+
     #[test]
-    #[ignore = "manual benchmark; requires --features vec and VEC0_EXTENSION_PATH"]
-    fn benchmark_vec_companion_vs_plain() -> sqlite3_ext::Result<()> {
-        let rusq = bench_rusqlite_conn("vec_bench");
+    #[ignore = "manual benchmark; run with cargo test --features vec benchmark_partitioned_vec_companion -- --ignored --nocapture"]
+    fn benchmark_partitioned_vec_companion_vs_plain() -> sqlite3_ext::Result<()> {
+        const K: usize = 10;
+
+        let rusq = bench_rusqlite_conn("partitioned_vec_bench");
         if !load_vec0(&rusq) {
             return Ok(());
         }
@@ -944,16 +1053,15 @@ mod vec_bench {
         let workload = BenchmarkWorkload::from_env();
         let dim = vec_dim();
         let rows = workload.total_rows();
+        if dim != DEFAULT_VEC_DIM {
+            panic!("PARTITIONER_BENCH_VEC_DIM override is not supported by this benchmark's DDL");
+        }
 
         init(db)?;
         db.execute(
             "CREATE VIRTUAL TABLE partitioned USING partitioner(1 hour, col1 timestamp partition_column, col2 text, emb text, companion vec USING vec0(emb float[64]))",
             (),
         )?;
-        // The companion clause carries the dim literally; adjust if overridden.
-        if dim != DEFAULT_VEC_DIM {
-            panic!("PARTITIONER_BENCH_VEC_DIM override not supported by this benchmark's DDL");
-        }
         db.execute("CREATE TABLE plain (col1 TEXT, col2 TEXT, emb TEXT)", ())?;
         db.execute("CREATE INDEX plain_col1_idx ON plain(col1)", ())?;
         db.execute(
@@ -961,17 +1069,17 @@ mod vec_bench {
             (),
         )?;
 
-        // --- Phase 1: ingest (plain side syncs vec0 by hand, row by row) ---
-        let plain_insert = {
+        eprintln!("vec benchmark: inserting plain rows");
+        let plain_ingest = {
             let start = Instant::now();
             let txn = db.transaction(TransactionType::Immediate)?;
             for i in 0..rows {
-                let (ts, payload) = bench_row_parts(workload, i);
+                let (timestamp, payload) = bench_row_parts(workload, i);
                 let vector = vector_for_row(i, dim);
                 txn.execute(
                     "INSERT INTO plain VALUES (?, ?, ?)",
                     |stmt: &mut sqlite3_ext::query::Statement| {
-                        ts.as_str().bind_param(stmt, 1)?;
+                        timestamp.as_str().bind_param(stmt, 1)?;
                         payload.as_str().bind_param(stmt, 2)?;
                         vector.as_str().bind_param(stmt, 3)?;
                         Ok(())
@@ -989,330 +1097,176 @@ mod vec_bench {
             start.elapsed()
         };
 
-        let partitioned_insert = {
+        eprintln!("vec benchmark: inserting partitioned rows");
+        let partitioned_ingest = {
             let start = Instant::now();
             let txn = db.transaction(TransactionType::Immediate)?;
             for i in 0..rows {
-                let (ts, payload) = bench_row_parts(workload, i);
+                let (timestamp, payload) = bench_row_parts(workload, i);
                 let vector = vector_for_row(i, dim);
                 txn.execute(
                     "INSERT INTO partitioned VALUES (?, ?, ?)",
                     |stmt: &mut sqlite3_ext::query::Statement| {
-                        ts.as_str().bind_param(stmt, 1)?;
+                        timestamp.as_str().bind_param(stmt, 1)?;
                         payload.as_str().bind_param(stmt, 2)?;
                         vector.as_str().bind_param(stmt, 3)?;
                         Ok(())
                     },
                 )?;
             }
-            txn.commit()?;
-            start.elapsed()
-        };
-
-        let plain_vec_count: i64 =
-            db.query_row("SELECT count(*) FROM plain_vec", (), |row| {
-                Ok(row.index(0).get_i64())
-            })?;
-        let partitioned_vec_count: i64 =
-            db.query_row("SELECT count(*) FROM partitioned_vec", (), |row| {
-                Ok(row.index(0).get_i64())
-            })?;
-
-        // --- Phase 2: pure KNN, k=10, full resolution round trip ---
-        let query_vector = vector_for_row(rows / 3, dim);
-
-        let plain_knn = {
-            let start = Instant::now();
-            let mut stmt = db.prepare(
-                "SELECT rowid, distance FROM plain_vec WHERE emb MATCH ? AND k = 10 ORDER BY distance",
-            )?;
-            let rows_iter = stmt.query([query_vector.as_str()])?;
-            let mut resolved = 0usize;
-            while let Ok(Some(row)) = rows_iter.next() {
-                let rowid = row[0].get_i64();
-                let _: String = db.query_row(
-                    "SELECT col2 FROM plain WHERE rowid = ?",
-                    [rowid],
-                    |r| Ok(r.index_mut(0).get_str()?.to_owned()),
-                )?;
-                resolved += 1;
+            if let Err(err) = txn.commit() {
+                panic!("partitioned vector benchmark commit failed: {err:?}");
             }
-            assert_eq!(resolved, 10);
             start.elapsed()
         };
+        eprintln!("vec benchmark: ingest complete");
 
-        let partitioned_knn = {
+        let all_partitions = partitions_in_range(db, None, None)?;
+        let partitioned_vec_rows =
+            all_partitions
+                .iter()
+                .try_fold(0i64, |total, (_, partition)| {
+                    db.query_row(
+                        &format!("SELECT count(*) FROM {}", partition_vec_table(partition)),
+                        (),
+                        |row| Ok(total + row[0].get_i64()),
+                    )
+                })?;
+        let plain_vec_rows: i64 = db.query_row("SELECT count(*) FROM plain_vec", (), |row| {
+            Ok(row[0].get_i64())
+        })?;
+        assert_eq!(partitioned_vec_rows as usize, rows);
+        assert_eq!(plain_vec_rows as usize, rows);
+
+        let query_row = rows / 3;
+        let query_vector = vector_for_row(query_row, dim);
+        let local_start = benchmark_start_timestamp()
+            + ChronoDuration::hours((query_row / workload.rows_per_minute / 60) as i64);
+        let local_end = local_start + ChronoDuration::hours(1);
+        let local_start = local_start.format("%Y-%m-%d %H:%M").to_string();
+        let local_end = local_end.format("%Y-%m-%d %H:%M").to_string();
+        let local_partition = partitions_in_range(db, Some(&local_start), Some(&local_end))?;
+        assert_eq!(local_partition.len(), 1);
+
+        let plain_global_knn = {
             let start = Instant::now();
-            let mut stmt = db.prepare(
-                "SELECT epoch, prowid, distance FROM partitioned_vec WHERE emb MATCH ? AND k = 10 ORDER BY distance",
-            )?;
-            let rows_iter = stmt.query([query_vector.as_str()])?;
-            let mut resolved = 0usize;
-            while let Ok(Some(row)) = rows_iter.next() {
-                let epoch = row[0].get_i64();
-                let prowid = row[1].get_i64();
-                let _: String = db.query_row(
-                    &format!("SELECT col2 FROM partitioned_{} WHERE rowid = ?", epoch),
-                    [prowid],
-                    |r| Ok(r.index_mut(0).get_str()?.to_owned()),
-                )?;
-                resolved += 1;
-            }
-            assert_eq!(resolved, 10);
+            let hits = plain_knn(db, query_vector.as_str(), K, None)?;
+            let resolved = resolve_plain_hits(db, &hits)?;
+            assert_eq!(resolved, K);
+            start.elapsed()
+        };
+        let partition_local_knn = {
+            let start = Instant::now();
+            let hits = merged_partition_knn(db, &local_partition, query_vector.as_str(), K)?;
+            let resolved = resolve_partition_hits(db, &hits)?;
+            assert_eq!(resolved, K);
+            start.elapsed()
+        };
+        // Un-windowed KNN merged across ALL partitions: same brute-force work
+        // as the plain global index, plus per-partition query overhead. This is
+        // the parity check for queries that don't involve the time column.
+        let partitioned_global_knn = {
+            let start = Instant::now();
+            let hits = merged_partition_knn(db, &all_partitions, query_vector.as_str(), K)?;
+            let resolved = resolve_partition_hits(db, &hits)?;
+            assert_eq!(resolved, K);
             start.elapsed()
         };
 
-        // --- Phase 3: time-windowed KNN (over-fetch 100, post-filter to 10) ---
         let (window_start, window_end) = workload.query_window();
-        let window_start_epoch = db.query_row(
-            "SELECT strftime('%s', ?)",
-            [window_start.as_str()],
-            |row| Ok(row.index(0).get_i64()),
-        )?;
-        let window_end_epoch: i64 = db.query_row(
-            "SELECT strftime('%s', ?)",
-            [window_end.as_str()],
-            |row| Ok(row.index(0).get_i64()),
-        )?;
-
+        let window_partitions = partitions_in_range(db, Some(&window_start), Some(&window_end))?;
         let plain_window_knn = {
             let start = Instant::now();
-            let mut stmt = db.prepare(
-                "SELECT rowid FROM plain_vec WHERE emb MATCH ? AND k = 100 ORDER BY distance",
+            let hits = plain_knn(
+                db,
+                query_vector.as_str(),
+                K,
+                Some((&window_start, &window_end)),
             )?;
-            let rows_iter = stmt.query([query_vector.as_str()])?;
-            let mut kept = 0usize;
-            while let Ok(Some(row)) = rows_iter.next() {
-                let in_window: i64 = db.query_row(
-                    "SELECT count(*) FROM plain WHERE rowid = ? AND col1 >= ? AND col1 < ?",
-                    |stmt: &mut sqlite3_ext::query::Statement| {
-                        row[0].get_i64().bind_param(stmt, 1)?;
-                        window_start.as_str().bind_param(stmt, 2)?;
-                        window_end.as_str().bind_param(stmt, 3)?;
-                        Ok(())
-                    },
-                    |r| Ok(r.index(0).get_i64()),
-                )?;
-                kept += in_window as usize;
-                if kept >= 10 {
-                    break;
-                }
-            }
+            let resolved = resolve_plain_hits(db, &hits)?;
+            assert_eq!(resolved, K);
             start.elapsed()
         };
-
         let partitioned_window_knn = {
             let start = Instant::now();
-            let mut stmt = db.prepare(
-                "SELECT epoch FROM partitioned_vec WHERE emb MATCH ? AND k = 100 ORDER BY distance",
-            )?;
-            let rows_iter = stmt.query([query_vector.as_str()])?;
-            let mut kept = 0usize;
-            while let Ok(Some(row)) = rows_iter.next() {
-                let epoch = row[0].get_i64();
-                let partition_start = epoch - epoch.rem_euclid(3600);
-                if partition_start >= window_start_epoch && partition_start < window_end_epoch {
-                    kept += 1;
-                    if kept >= 10 {
-                        break;
-                    }
-                }
-            }
+            let hits = merged_partition_knn(db, &window_partitions, query_vector.as_str(), K)?;
+            let resolved = resolve_partition_hits(db, &hits)?;
+            assert_eq!(resolved, K);
             start.elapsed()
         };
+        eprintln!("vec benchmark: KNN phases complete");
 
-        // --- Phase 4: retention purge of one hour ---
         let (delete_start, delete_end) = workload.delete_window();
-        let delete_start_epoch: i64 = db.query_row(
-            "SELECT strftime('%s', ?)",
-            [delete_start.as_str()],
-            |row| Ok(row.index(0).get_i64()),
+        let plain_retention = timed_execute(
+            db,
+            &format!(
+                "DELETE FROM plain_vec WHERE rowid IN (SELECT rowid FROM plain WHERE col1 >= '{delete_start}' AND col1 < '{delete_end}')"
+            ),
+        )? + timed_execute(
+            db,
+            &format!("DELETE FROM plain WHERE col1 >= '{delete_start}' AND col1 < '{delete_end}'"),
         )?;
-
-        let plain_purge = {
+        let partitioned_retention = {
+            let mut partitions = partitions_in_range(db, Some(&delete_start), Some(&delete_end))?;
+            let partition = partitions
+                .pop()
+                .expect("delete window covers one existing partition");
             let start = Instant::now();
             db.execute(
-                &format!(
-                    "DELETE FROM plain_vec WHERE rowid IN (SELECT rowid FROM plain WHERE col1 >= '{delete_start}' AND col1 < '{delete_end}')"
-                ),
+                &format!("DROP TABLE {}", partition_vec_table(&partition.1)),
                 (),
             )?;
-            let vec_delete = start.elapsed();
-            let start_rows = Instant::now();
+            db.execute(&format!("DROP TABLE {}", partition.1), ())?;
             db.execute(
-                &format!(
-                    "DELETE FROM plain WHERE col1 >= '{delete_start}' AND col1 < '{delete_end}'"
-                ),
-                (),
-            )?;
-            let rows_delete = start_rows.elapsed();
-            println!(
-                "  plain purge breakdown: vec rows delete={:?} plain rows delete={:?}",
-                vec_delete, rows_delete
-            );
-            start.elapsed()
-        };
-
-        let partitioned_purge = {
-            let partition_name: String = db.query_row(
-                "SELECT partition_table FROM partitioned_lookup WHERE partition_value = ?",
-                [delete_start_epoch],
-                |row| Ok(row.index_mut(0).get_str()?.to_string()),
-            )?;
-            let start = Instant::now();
-            db.execute(
-                &format!("DELETE FROM partitioned_vec WHERE rowid IN (SELECT vec_rowid FROM partitioned_vec_keys WHERE epoch = {})", delete_start_epoch),
-                (),
-            )?;
-            let vec_delete = start.elapsed();
-            let start_keys = Instant::now();
-            db.execute(
-                &format!("DELETE FROM partitioned_vec_keys WHERE epoch = {}", delete_start_epoch),
-                (),
-            )?;
-            let keys_delete = start_keys.elapsed();
-            let start_drop = Instant::now();
-            db.execute(&format!("DROP TABLE {}", partition_name), ())?;
-            db.execute(
-                "DELETE FROM partitioned_lookup WHERE partition_table = ?",
-                [partition_name.as_str()],
+                "DELETE FROM partitioned_lookup WHERE partition_value = ?",
+                [partition.0],
             )?;
             db.execute(
                 "DELETE FROM partitioned_stats WHERE partition_table = ?",
-                [partition_name.as_str()],
+                [partition.1.as_str()],
             )?;
-            let drop_meta = start_drop.elapsed();
-            println!(
-                "  purge breakdown: vec rows delete={:?} keys delete={:?} drop+meta={:?}",
-                vec_delete, keys_delete, drop_meta
-            );
             start.elapsed()
         };
-
-        // --- Phase 5: the target workflow — distance <= threshold within a
-        // time window spanning multiple partitions, ordered by time DESC.
-        // Pre-filter strategy: vec0 accepts `rowid IN (subquery)` inside a KNN
-        // query, so both sides constrain the KNN to rows in the time window
-        // first instead of over-fetching and post-filtering.
-        // Threshold: distance of the 20th nearest neighbor overall.
-        let threshold: f64 = {
-            let mut stmt = db.prepare(
-                "SELECT distance FROM plain_vec WHERE emb MATCH ? AND k = 500 ORDER BY distance LIMIT 1 OFFSET 19",
-            )?;
-            let rows_iter = stmt.query([query_vector.as_str()])?;
-            match rows_iter.next() {
-                Ok(Some(row)) => row[0].get_f64(),
-                _ => f64::MAX,
-            }
-        };
-
-        let plain_similar_recent = {
-            let start = Instant::now();
-            let sql = format!(
-                "WITH knn AS MATERIALIZED (
-                   SELECT rowid, distance FROM plain_vec
-                   WHERE emb MATCH ? AND k = 100
-                     AND rowid IN (SELECT rowid FROM plain WHERE col1 >= '{window_start}' AND col1 < '{window_end}')
-                 )
-                 SELECT p.col1, p.col2, knn.distance FROM knn
-                 JOIN plain p ON p.rowid = knn.rowid
-                 WHERE knn.distance <= ?
-                 ORDER BY p.col1 DESC LIMIT 20"
-            );
-            let mut stmt = db.prepare(&sql)?;
-            query_vector.as_str().bind_param(&mut stmt, 1)?;
-            threshold.bind_param(&mut stmt, 2)?;
-            let rows_iter = stmt.query(())?;
-            let mut count = 0usize;
-            while let Ok(Some(_row)) = rows_iter.next() {
-                count += 1;
-            }
-            (start.elapsed(), count)
-        };
-
-        // Partitioned side: pre-filter vec rowids through the keys table by
-        // epoch window (indexed), select the (epoch, prowid) locators straight
-        // from the vec aux columns (selectable, just not constrainable), then
-        // resolve through a UNION of the partition tables overlapping the
-        // window, ordered by time descending across partition boundaries.
-        let window_partitions: Vec<(i64, String)> = {
-            let mut stmt = db.prepare(
-                "SELECT partition_value, partition_table FROM partitioned_lookup
-                 WHERE partition_value >= ? AND partition_value < ?",
-            )?;
-            let rows_iter = stmt.query([window_start_epoch, window_end_epoch])?;
-            let mut out = Vec::new();
-            while let Ok(Some(row)) = rows_iter.next() {
-                out.push((row[0].get_i64(), row[1].get_str()?.to_owned()));
-            }
-            out
-        };
-        let union = window_partitions
-            .iter()
-            .map(|(epoch, table)| {
-                format!("SELECT rowid AS r, {} AS ep, col1, col2 FROM {}", epoch, table)
-            })
-            .collect::<Vec<_>>()
-            .join(" UNION ALL ");
-
-        let partitioned_similar_recent = {
-            let start = Instant::now();
-            let sql = format!(
-                "WITH knn AS MATERIALIZED (
-                   SELECT epoch, prowid, distance FROM partitioned_vec
-                   WHERE emb MATCH ? AND k = 100
-                     AND rowid IN (SELECT vec_rowid FROM partitioned_vec_keys
-                                   WHERE epoch >= {window_start_epoch} AND epoch < {window_end_epoch})
-                 )
-                 SELECT e.col1, e.col2, knn.distance FROM knn
-                 JOIN ({}) e ON e.ep = knn.epoch AND e.r = knn.prowid
-                 WHERE knn.distance <= ?
-                 ORDER BY e.col1 DESC LIMIT 20",
-                union
-            );
-            let mut stmt = db.prepare(&sql)?;
-            query_vector.as_str().bind_param(&mut stmt, 1)?;
-            threshold.bind_param(&mut stmt, 2)?;
-            let rows_iter = stmt.query(())?;
-            let mut count = 0usize;
-            while let Ok(Some(_row)) = rows_iter.next() {
-                count += 1;
-            }
-            (start.elapsed(), count)
-        };
+        eprintln!("vec benchmark: retention complete");
 
         println!(
-            "similar-in-window ORDER BY time DESC (threshold={:.4}): partitioned={:?} ({} rows) | plain={:?} ({} rows)",
-            threshold,
-            partitioned_similar_recent.0,
-            partitioned_similar_recent.1,
-            plain_similar_recent.0,
-            plain_similar_recent.1
+            "storage={} dim={} workload={}",
+            bench_storage_label(),
+            dim,
+            workload.label()
+        );
+        println!(
+            "ingest: partitioned+partition-local-vec={:?} | plain+global-vec={:?}",
+            partitioned_ingest, plain_ingest
+        );
+        println!(
+            "vector partitions={} vector rows: partitioned={} plain={}",
+            all_partitions.len(),
+            partitioned_vec_rows,
+            plain_vec_rows
+        );
+        println!(
+            "knn k={K}: one partition+resolve={:?} | plain global+resolve={:?}",
+            partition_local_knn, plain_global_knn
+        );
+        println!(
+            "global knn k={K} (no time filter): partitioned merge across all {} partitions={:?} | plain global={:?}",
+            all_partitions.len(), partitioned_global_knn, plain_global_knn
+        );
+        println!(
+            "windowed knn k={K}: partitioned merge across {} partitions={:?} | plain global index with time filter={:?}",
+            window_partitions.len(), partitioned_window_knn, plain_window_knn
+        );
+        println!(
+            "retention (one data/vector partition): partitioned drop-pair={:?} | plain vector+row delete={:?}",
+            partitioned_retention, plain_retention
         );
 
-        println!("storage={} dim={} workload={}", bench_storage_label(), dim, workload.label());
-        println!(
-            "ingest: partitioned+companion={:?} | plain+manual vec sync={:?}",
-            partitioned_insert, plain_insert
-        );
-        println!(
-            "vec row counts: partitioned_vec={} plain_vec={}",
-            partitioned_vec_count, plain_vec_count
-        );
-        println!(
-            "knn k=10 (with resolution): partitioned={:?} | plain={:?}",
-            partitioned_knn, plain_knn
-        );
-        println!(
-            "windowed knn k=10 (over-fetch 100, post-filter): partitioned={:?} | plain={:?}",
-            partitioned_window_knn, plain_window_knn
-        );
-        println!(
-            "retention purge (1 hour of rows + vectors): partitioned={:?} | plain={:?}",
-            partitioned_purge, plain_purge
-        );
-
-        let _ = std::fs::remove_file(temp_benchmark_db_path("vec_bench"));
+        eprintln!("vec benchmark: destroying partitioned table");
+        db.execute("DROP TABLE partitioned", ())?;
+        db.execute("DROP TABLE plain_vec", ())?;
+        db.execute("DROP TABLE plain", ())?;
+        let _ = std::fs::remove_file(temp_benchmark_db_path("partitioned_vec_bench"));
         Ok(())
     }
 }

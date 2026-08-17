@@ -29,6 +29,8 @@ nav_order: 3
   time range from per-partition statistics, without scanning rows.
 - Companion shadow tables (experimental, `--features vec`): keep an external
   virtual table — e.g. sqlite-vec `vec0` for vector search — in sync with the
-  data partitions, with automatic purge on retention cleanup.
+  data partitions. Each data partition gets its own companion table sharing its
+  rowids, so retention cleanup drops the partition's vectors with the partition
+  itself (no row-by-row index deletes).
 - Cross-platform: prebuilt extensions for macOS (arm64), Linux (x86_64), and
   Windows (x86_64).

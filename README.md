@@ -174,20 +174,27 @@ CREATE VIRTUAL TABLE events USING partitioner(
 );
 ```
 
-This creates `events_vec`, a flat vec0 table whose rows carry `(embedding,
-epoch, prowid)` locators. Inserts, updates, and deletes on `events` stay in
-sync; `partitioner_cleanup` purges the vectors of expired partitions. Query it
-with a KNN search and resolve the locators back to rows (wrap the KNN in
-`WITH ... AS MATERIALIZED` — vec0 rejects pushed-down join constraints):
+Each data partition gets a matching vec0 table using the same rowids, e.g.
+`events_1767225600` is paired with `events_1767225600_vec`. Inserts, updates,
+and deletes on `events` stay in sync. Expiry drops both tables together, so no
+vectors are retained in a shared global index. Query each time partition that
+can contribute to the result, then merge its KNN candidates with those from the
+other relevant partitions:
 
 ```sql
 WITH knn AS MATERIALIZED (
-    SELECT epoch, prowid, distance FROM events_vec
+    SELECT rowid, distance FROM events_1767225600_vec
     WHERE embedding MATCH '[...]' AND k = 10
     ORDER BY distance
 )
-SELECT ... -- join knn back to partitions on (epoch, prowid)
+SELECT e.*, knn.distance
+FROM knn JOIN events_1767225600 AS e ON e.rowid = knn.rowid;
 ```
+
+For a range spanning multiple partitions, run the same query for each paired
+`*_vec` table and merge the candidates in the application (or in generated SQL).
+There is deliberately no one-table global KNN query: that would require a
+separate global vector index and make retention delete vector rows individually.
 
 The mechanism is generic: companions implement a small Rust trait, and new
 companion modules can be registered without touching the core partitioning

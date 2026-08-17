@@ -42,12 +42,7 @@ impl CompanionDecl {
     /// can treat non-companion arguments as regular column declarations.
     pub fn parse(arg: &str) -> Result<Option<Self>, TableError> {
         let tokens: Vec<&str> = arg.splitn(4, char::is_whitespace).collect();
-        if tokens
-            .first()
-            .map(|token| token.to_lowercase())
-            .as_deref()
-            != Some("companion")
-        {
+        if tokens.first().map(|token| token.to_lowercase()).as_deref() != Some("companion") {
             return Ok(None);
         }
         let invalid = || {
@@ -74,7 +69,7 @@ impl CompanionDecl {
     }
 }
 
-/// A companion shadow table kept in sync with a partitioned table.
+/// A partition-scoped companion shadow kept in sync with a partitioned table.
 ///
 /// Implementations receive lifecycle callbacks from the extension's write paths.
 /// All callbacks run on the same connection inside the caller's transaction, so
@@ -83,17 +78,20 @@ pub trait Companion: Debug {
     /// Companion name; the shadow table is `<base>_<name>`.
     fn name(&self) -> &str;
 
-    /// Name of the companion's shadow table for the given base table.
-    fn table_name(&self, base_name: &str) -> String {
-        format!("{}_{}", base_name, self.name())
-    }
+    /// Creates this companion's shadow for one physical data partition.
+    fn on_partition_created(
+        &self,
+        db: &Connection,
+        base_name: &str,
+        partition_value: i64,
+    ) -> ExtResult<()>;
 
-    /// SQL statements creating the companion's shadow table(s), in order.
-    fn create_sql(&self, base_name: &str) -> Vec<String>;
-
-    /// SQL statements dropping the companion's shadow table(s), in order.
-    fn drop_sql(&self, base_name: &str) -> Vec<String> {
-        vec![format!("DROP TABLE {}", self.table_name(base_name))]
+    /// SQL statements dropping any non-partition-scoped companion objects.
+    ///
+    /// The standard companion lifecycle drops per-partition objects through
+    /// [`Self::on_partition_dropped`], so this is normally empty.
+    fn drop_sql(&self, _base_name: &str) -> Vec<String> {
+        Vec::new()
     }
 
     /// Called after a batch of rows has been flushed into a partition.
@@ -266,8 +264,8 @@ pub(crate) mod tests {
 
     use super::{synced_column_indices, Companion, CompanionDecl};
 
-    /// Test-only companion mirroring synced columns into a plain table
-    /// `<base>_mirror`, so the sync machinery can be tested without vec0.
+    /// Test-only companion mirroring synced columns into one plain table per
+    /// data partition, so the sync machinery can be tested without vec0.
     #[derive(Debug)]
     pub(crate) struct MirrorCompanion {
         name: String,
@@ -293,16 +291,17 @@ pub(crate) mod tests {
             })
         }
 
-        fn insert_sql(&self, base_name: &str, row_count: usize) -> String {
-            let columns = self
-                .sync_names
-                .iter()
-                .cloned()
-                .chain(["epoch".to_string(), "prowid".to_string()])
+        fn partition_table_name(&self, base_name: &str, partition_value: i64) -> String {
+            format!("{}_{}_{}", base_name, partition_value, self.name)
+        }
+
+        fn insert_sql(&self, base_name: &str, partition_value: i64, row_count: usize) -> String {
+            let columns = std::iter::once("rowid".to_string())
+                .chain(self.sync_names.iter().cloned())
                 .collect::<Vec<_>>()
                 .join(", ");
             let row_placeholders = std::iter::repeat("?")
-                .take(self.sync_names.len() + 2)
+                .take(self.sync_names.len() + 1)
                 .collect::<Vec<_>>()
                 .join(",");
             let values_clause = (0..row_count)
@@ -311,7 +310,7 @@ pub(crate) mod tests {
                 .join(",");
             format!(
                 "INSERT INTO {} ({}) VALUES {}",
-                self.table_name(base_name),
+                self.partition_table_name(base_name, partition_value),
                 columns,
                 values_clause
             )
@@ -323,12 +322,21 @@ pub(crate) mod tests {
             &self.name
         }
 
-        fn create_sql(&self, base_name: &str) -> Vec<String> {
-            vec![format!(
-                "CREATE TABLE {} ({}, epoch integer, prowid integer)",
-                self.table_name(base_name),
-                self.sync_names.join(", ")
-            )]
+        fn on_partition_created(
+            &self,
+            db: &Connection,
+            base_name: &str,
+            partition_value: i64,
+        ) -> ExtResult<()> {
+            db.execute(
+                &format!(
+                    "CREATE TABLE IF NOT EXISTS {} (rowid INTEGER PRIMARY KEY, {})",
+                    self.partition_table_name(base_name, partition_value),
+                    self.sync_names.join(", ")
+                ),
+                (),
+            )?;
+            Ok(())
         }
 
         fn on_rows_flushed(
@@ -339,16 +347,15 @@ pub(crate) mod tests {
             first_rowid: i64,
             rows: &[PendingRow],
         ) -> ExtResult<()> {
-            let mut stmt = db.prepare(&self.insert_sql(base_name, rows.len()))?;
+            let mut stmt = db.prepare(&self.insert_sql(base_name, partition_value, rows.len()))?;
             let mut position = 1i32;
             for (row_offset, row) in rows.iter().enumerate() {
+                (first_rowid + row_offset as i64).bind_param(&mut stmt, position)?;
+                position += 1;
                 for &index in &self.sync_indices {
                     row.values[index].clone().bind_param(&mut stmt, position)?;
                     position += 1;
                 }
-                partition_value.bind_param(&mut stmt, position)?;
-                (first_rowid + row_offset as i64).bind_param(&mut stmt, position + 1)?;
-                position += 2;
             }
             stmt.execute(())?;
             Ok(())
@@ -362,14 +369,13 @@ pub(crate) mod tests {
             rowid: i64,
             values: &[&ValueRef],
         ) -> ExtResult<()> {
-            let mut stmt = db.prepare(&self.insert_sql(base_name, 1))?;
+            let mut stmt = db.prepare(&self.insert_sql(base_name, partition_value, 1))?;
+            rowid.bind_param(&mut stmt, 1)?;
             let mut position = 1i32;
             for &index in &self.sync_indices {
-                values[index].bind_param(&mut stmt, position)?;
+                values[index].bind_param(&mut stmt, position + 1)?;
                 position += 1;
             }
-            partition_value.bind_param(&mut stmt, position)?;
-            rowid.bind_param(&mut stmt, position + 1)?;
             stmt.execute(())?;
             Ok(())
         }
@@ -383,10 +389,10 @@ pub(crate) mod tests {
         ) -> ExtResult<()> {
             db.execute(
                 &format!(
-                    "DELETE FROM {} WHERE epoch = ? AND prowid = ?",
-                    self.table_name(base_name)
+                    "DELETE FROM {} WHERE rowid = ?",
+                    self.partition_table_name(base_name, partition_value)
                 ),
-                sqlite3_ext::params![partition_value, rowid],
+                sqlite3_ext::params![rowid],
             )?;
             Ok(())
         }
@@ -399,10 +405,10 @@ pub(crate) mod tests {
         ) -> ExtResult<()> {
             db.execute(
                 &format!(
-                    "DELETE FROM {} WHERE epoch = ?",
-                    self.table_name(base_name)
+                    "DROP TABLE IF EXISTS {}",
+                    self.partition_table_name(base_name, partition_value)
                 ),
-                sqlite3_ext::params![partition_value],
+                (),
             )?;
             Ok(())
         }
@@ -434,17 +440,33 @@ pub(crate) mod tests {
     }
 
     fn mirror_rows(conn: &Connection) -> Vec<(String, i64, i64)> {
-        let mut stmt = conn
-            .prepare("SELECT col2, epoch, prowid FROM test_mirror ORDER BY epoch, prowid")
-            .unwrap();
-        let rows = stmt.query(()).unwrap();
+        let partition_values = {
+            let mut stmt = conn
+                .prepare("SELECT partition_value FROM test_lookup ORDER BY partition_value")
+                .unwrap();
+            let rows = stmt.query(()).unwrap();
+            let mut values = Vec::new();
+            while let Ok(Some(row)) = rows.next() {
+                values.push(row[0].get_i64());
+            }
+            values
+        };
         let mut out = Vec::new();
-        while let Ok(Some(row)) = rows.next() {
-            out.push((
-                row[0].get_str().unwrap().to_owned(),
-                row[1].get_i64(),
-                row[2].get_i64(),
-            ));
+        for partition_value in partition_values {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT col2, rowid FROM test_{}_mirror ORDER BY rowid",
+                    partition_value
+                ))
+                .unwrap();
+            let rows = stmt.query(()).unwrap();
+            while let Ok(Some(row)) = rows.next() {
+                out.push((
+                    row[0].get_str().unwrap().to_owned(),
+                    partition_value,
+                    row[1].get_i64(),
+                ));
+            }
         }
         out
     }
@@ -492,7 +514,10 @@ pub(crate) mod tests {
         conn.execute("DELETE FROM test WHERE col2 = 'b2'", ())?;
         assert_eq!(
             mirror_rows(conn),
-            vec![("a".to_string(), 1704103200, 1), ("c".to_string(), 1704106800, 1)]
+            vec![
+                ("a".to_string(), 1704103200, 1),
+                ("c".to_string(), 1704106800, 1)
+            ]
         );
 
         // Partition-moving update re-locates the companion row.

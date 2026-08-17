@@ -30,7 +30,8 @@ tables behind the scenes.
 - **`src/companions`** — pluggable companion shadow tables (experimental).
   A `Companion` trait with lifecycle hooks on flush/insert/delete/cleanup;
   the sqlite-vec (`vec0`) implementation lives behind the `vec` Cargo
-  feature. Declarations are stored in a `<name>_companions` shadow table.
+  feature. Each data partition owns its matching companion table and shares its
+  rowids with it; declarations are stored in a `<name>_companions` shadow table.
 - **`src/types`** — parsed column declarations, constraints, and WHERE-clause
   helpers.
 - **`src/utils`** — interval parsing, value-type parsing, and datetime helpers.

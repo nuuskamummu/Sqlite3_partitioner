@@ -207,9 +207,6 @@ impl<'vtab> VirtualTable<'vtab> {
             for decl in companion_decls {
                 companions::store_decl(db, name, decl)?;
                 let companion = companions::instantiate(decl, template_table.columns())?;
-                for sql in companion.create_sql(name) {
-                    db.execute(&sql, ())?;
-                }
                 companions.push(companion);
             }
             companions
@@ -238,13 +235,29 @@ impl<'vtab> VirtualTable<'vtab> {
     /// an error is returned detailing the issue.
     pub fn destroy(&self) -> sqlite3_ext::Result<()> {
         self.flush_all()?;
-        for partition in self.lookup_table.get_partitions_by_range(
+        // Finalize cached statements before their referenced partition tables are
+        // dropped. Besides releasing SQLite resources deterministically, this
+        // prevents connection close from failing with SQLITE_BUSY after a table
+        // that received buffered inserts is destroyed.
+        self.insert_statements.borrow_mut().clear();
+        self.batch_insert_statements.borrow_mut().clear();
+        for (partition_value, partition_name) in self.lookup_table.get_partitions_by_range(
             self.connection,
             &std::ops::Bound::Unbounded,
             &std::ops::Bound::Unbounded,
         )? {
+            for companion in &self.companions {
+                companion.on_partition_dropped(
+                    self.connection,
+                    &self.base_name,
+                    partition_value,
+                )?;
+            }
+            // IF EXISTS: the lookup sync is add-only, so a partition dropped
+            // outside the extension (e.g. manual retention SQL) would otherwise
+            // fail the whole destroy with "no such table".
             self.connection
-                .execute(&format!("DROP TABLE {}", partition.1), ())?;
+                .execute(&format!("DROP TABLE IF EXISTS {}", partition_name), ())?;
         }
         self.lookup_table.drop_table(self.connection)?;
         self.stats_table.drop_table(self.connection)?;
@@ -476,6 +489,9 @@ impl<'vtab> VirtualTable<'vtab> {
     /// The ROWID of the inserted row.
     pub fn insert(&self, partition_value: i64, columns: &[&ValueRef]) -> sqlite3_ext::Result<i64> {
         let partition = self.get_partition(&partition_value)?;
+        for companion in &self.companions {
+            companion.on_partition_created(self.connection, &self.base_name, partition_value)?;
+        }
         let rowid = {
             let mut cached_statements = self.insert_statements.borrow_mut();
             let stmt = if let Some(stmt) = cached_statements.get_mut(&partition) {
@@ -608,6 +624,14 @@ impl<'vtab> VirtualTable<'vtab> {
             let at = chunk_size.min(rows.len());
             let chunk: Vec<PendingRow> = rows.drain(..at).collect();
 
+            for companion in &self.companions {
+                companion.on_partition_created(
+                    self.connection,
+                    &self.base_name,
+                    partition_value,
+                )?;
+            }
+
             let row_placeholders = std::iter::repeat("?")
                 .take(column_count)
                 .collect::<Vec<_>>()
@@ -630,13 +654,18 @@ impl<'vtab> VirtualTable<'vtab> {
                 }
             }
             stmt.execute(())?;
+            // Release the cached data statement before companion writes. SQLite
+            // can otherwise retain a table lock across this callback, preventing
+            // a partition-local vec0 table from accepting the matching batch in
+            // an explicit transaction.
+            drop(cached_statements);
 
             if !self.companions.is_empty() {
                 // Chunk inserts into a rowid table without explicit rowids produce
                 // consecutive rowids ending at last_insert_rowid().
-                let last_rowid: i64 = self
-                    .connection
-                    .query_row("SELECT last_insert_rowid()", (), |row| Ok(row[0].get_i64()))?;
+                let last_rowid: i64 =
+                    self.connection
+                        .query_row("SELECT last_insert_rowid()", (), |row| Ok(row[0].get_i64()))?;
                 let first_rowid = last_rowid - chunk.len() as i64 + 1;
                 for companion in &self.companions {
                     companion.on_rows_flushed(
