@@ -1180,6 +1180,100 @@ mod vec_bench {
             start.elapsed()
         };
 
+        // --- Phase 5: the target workflow — distance <= threshold within a
+        // time window spanning multiple partitions, ordered by time DESC.
+        // vec0 (0.1.9) has no distance-threshold scan, so both sides over-fetch
+        // KNN k=500 and filter by distance + time afterwards.
+        // Threshold: distance of the 20th nearest neighbor overall.
+        let threshold: f64 = {
+            let mut stmt = db.prepare(
+                "SELECT distance FROM plain_vec WHERE emb MATCH ? AND k = 500 ORDER BY distance LIMIT 1 OFFSET 19",
+            )?;
+            let rows_iter = stmt.query([query_vector.as_str()])?;
+            match rows_iter.next() {
+                Ok(Some(row)) => row[0].get_f64(),
+                _ => f64::MAX,
+            }
+        };
+
+        let plain_similar_recent = {
+            let start = Instant::now();
+            let sql = format!(
+                "WITH knn AS MATERIALIZED (
+                   SELECT rowid, distance FROM plain_vec WHERE emb MATCH ? AND k = 500
+                 )
+                 SELECT p.col1, p.col2, knn.distance FROM knn
+                 JOIN plain p ON p.rowid = knn.rowid
+                 WHERE p.col1 >= '{window_start}' AND p.col1 < '{window_end}'
+                   AND knn.distance <= ?
+                 ORDER BY p.col1 DESC LIMIT 20"
+            );
+            let mut stmt = db.prepare(&sql)?;
+            query_vector.as_str().bind_param(&mut stmt, 1)?;
+            threshold.bind_param(&mut stmt, 2)?;
+            let rows_iter = stmt.query(())?;
+            let mut count = 0usize;
+            while let Ok(Some(_row)) = rows_iter.next() {
+                count += 1;
+            }
+            (start.elapsed(), count)
+        };
+
+        // Partitioned side: resolve locators through a UNION of the partition
+        // tables overlapping the window (looked up from the lookup table),
+        // ordered by time descending across partition boundaries.
+        let window_partitions: Vec<(i64, String)> = {
+            let mut stmt = db.prepare(
+                "SELECT partition_value, partition_table FROM partitioned_lookup
+                 WHERE partition_value >= ? AND partition_value < ?",
+            )?;
+            let rows_iter = stmt.query([window_start_epoch, window_end_epoch])?;
+            let mut out = Vec::new();
+            while let Ok(Some(row)) = rows_iter.next() {
+                out.push((row[0].get_i64(), row[1].get_str()?.to_owned()));
+            }
+            out
+        };
+        let union = window_partitions
+            .iter()
+            .map(|(epoch, table)| {
+                format!("SELECT rowid AS r, {} AS ep, col1, col2 FROM {}", epoch, table)
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+
+        let partitioned_similar_recent = {
+            let start = Instant::now();
+            let sql = format!(
+                "WITH knn AS MATERIALIZED (
+                   SELECT epoch, prowid, distance FROM partitioned_vec WHERE emb MATCH ? AND k = 500
+                 )
+                 SELECT e.col1, e.col2, knn.distance FROM knn
+                 JOIN ({}) e ON e.ep = knn.epoch AND e.r = knn.prowid
+                 WHERE knn.distance <= ?
+                 ORDER BY e.col1 DESC LIMIT 20",
+                union
+            );
+            let mut stmt = db.prepare(&sql)?;
+            query_vector.as_str().bind_param(&mut stmt, 1)?;
+            threshold.bind_param(&mut stmt, 2)?;
+            let rows_iter = stmt.query(())?;
+            let mut count = 0usize;
+            while let Ok(Some(_row)) = rows_iter.next() {
+                count += 1;
+            }
+            (start.elapsed(), count)
+        };
+
+        println!(
+            "similar-in-window ORDER BY time DESC (threshold={:.4}): partitioned={:?} ({} rows) | plain={:?} ({} rows)",
+            threshold,
+            partitioned_similar_recent.0,
+            partitioned_similar_recent.1,
+            plain_similar_recent.0,
+            plain_similar_recent.1
+        );
+
         println!("storage={} dim={} workload={}", bench_storage_label(), dim, workload.label());
         println!(
             "ingest: partitioned+companion={:?} | plain+manual vec sync={:?}",
