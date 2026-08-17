@@ -1,0 +1,9 @@
+  plain purge breakdown: vec rows delete=779.520292ms plain rows delete=27.912417ms
+  purge breakdown: vec rows delete=869.173833ms keys delete=16.309291ms drop+meta=3.793083ms
+similar-in-window ORDER BY time DESC (threshold=2.3061): partitioned=97.190166ms (0 rows) | plain=93.608542ms (0 rows)
+ingest: partitioned+companion=44.640125084s | plain+manual vec sync=36.186428333s
+vec row counts: partitioned_vec=1440000 plain_vec=1440000
+knn k=10 (with resolution): partitioned=37.199209ms | plain=42.736458ms
+windowed knn k=10 (over-fetch 100, post-filter): partitioned=149.13025ms | plain=148.19675ms
+retention purge (1 hour of rows + vectors): partitioned=889.291583ms | plain=807.44925ms
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 84.66s
