@@ -88,12 +88,12 @@ pub trait Companion: Debug {
         format!("{}_{}", base_name, self.name())
     }
 
-    /// SQL creating the companion shadow table.
-    fn create_sql(&self, base_name: &str) -> String;
+    /// SQL statements creating the companion's shadow table(s), in order.
+    fn create_sql(&self, base_name: &str) -> Vec<String>;
 
-    /// SQL dropping the companion shadow table.
-    fn drop_sql(&self, base_name: &str) -> String {
-        format!("DROP TABLE {}", self.table_name(base_name))
+    /// SQL statements dropping the companion's shadow table(s), in order.
+    fn drop_sql(&self, base_name: &str) -> Vec<String> {
+        vec![format!("DROP TABLE {}", self.table_name(base_name))]
     }
 
     /// Called after a batch of rows has been flushed into a partition.
@@ -323,12 +323,12 @@ pub(crate) mod tests {
             &self.name
         }
 
-        fn create_sql(&self, base_name: &str) -> String {
-            format!(
+        fn create_sql(&self, base_name: &str) -> Vec<String> {
+            vec![format!(
                 "CREATE TABLE {} ({}, epoch integer, prowid integer)",
                 self.table_name(base_name),
                 self.sync_names.join(", ")
-            )
+            )]
         }
 
         fn on_rows_flushed(

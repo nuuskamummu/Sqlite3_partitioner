@@ -207,7 +207,9 @@ impl<'vtab> VirtualTable<'vtab> {
             for decl in companion_decls {
                 companions::store_decl(db, name, decl)?;
                 let companion = companions::instantiate(decl, template_table.columns())?;
-                db.execute(&companion.create_sql(name), ())?;
+                for sql in companion.create_sql(name) {
+                    db.execute(&sql, ())?;
+                }
                 companions.push(companion);
             }
             companions
@@ -247,8 +249,9 @@ impl<'vtab> VirtualTable<'vtab> {
         self.lookup_table.drop_table(self.connection)?;
         self.stats_table.drop_table(self.connection)?;
         for companion in &self.companions {
-            self.connection
-                .execute(&companion.drop_sql(&self.base_name), ())?;
+            for sql in companion.drop_sql(&self.base_name) {
+                self.connection.execute(&sql, ())?;
+            }
         }
         companions::drop_store(self.connection, &self.base_name)?;
         self.root_table.drop_table(self.connection)?;

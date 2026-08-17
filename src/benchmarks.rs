@@ -1128,12 +1128,19 @@ mod vec_bench {
                 ),
                 (),
             )?;
+            let vec_delete = start.elapsed();
+            let start_rows = Instant::now();
             db.execute(
                 &format!(
                     "DELETE FROM plain WHERE col1 >= '{delete_start}' AND col1 < '{delete_end}'"
                 ),
                 (),
             )?;
+            let rows_delete = start_rows.elapsed();
+            println!(
+                "  plain purge breakdown: vec rows delete={:?} plain rows delete={:?}",
+                vec_delete, rows_delete
+            );
             start.elapsed()
         };
 
@@ -1145,9 +1152,17 @@ mod vec_bench {
             )?;
             let start = Instant::now();
             db.execute(
-                &format!("DELETE FROM partitioned_vec WHERE epoch = {}", delete_start_epoch),
+                &format!("DELETE FROM partitioned_vec WHERE rowid IN (SELECT vec_rowid FROM partitioned_vec_keys WHERE epoch = {})", delete_start_epoch),
                 (),
             )?;
+            let vec_delete = start.elapsed();
+            let start_keys = Instant::now();
+            db.execute(
+                &format!("DELETE FROM partitioned_vec_keys WHERE epoch = {}", delete_start_epoch),
+                (),
+            )?;
+            let keys_delete = start_keys.elapsed();
+            let start_drop = Instant::now();
             db.execute(&format!("DROP TABLE {}", partition_name), ())?;
             db.execute(
                 "DELETE FROM partitioned_lookup WHERE partition_table = ?",
@@ -1157,6 +1172,11 @@ mod vec_bench {
                 "DELETE FROM partitioned_stats WHERE partition_table = ?",
                 [partition_name.as_str()],
             )?;
+            let drop_meta = start_drop.elapsed();
+            println!(
+                "  purge breakdown: vec rows delete={:?} keys delete={:?} drop+meta={:?}",
+                vec_delete, keys_delete, drop_meta
+            );
             start.elapsed()
         };
 
