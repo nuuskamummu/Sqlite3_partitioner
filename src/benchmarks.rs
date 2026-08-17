@@ -876,3 +876,313 @@ fn benchmark_realistic_wide_table() -> sqlite3_ext::Result<()> {
 
     Ok(())
 }
+
+// --- Vector companion benchmark (feature "vec", requires VEC0_EXTENSION_PATH) ---
+
+#[cfg(feature = "vec")]
+mod vec_bench {
+    use super::*;
+
+    const DEFAULT_VEC_DIM: usize = 64;
+
+    fn vec_dim() -> usize {
+        read_env_usize("PARTITIONER_BENCH_VEC_DIM", DEFAULT_VEC_DIM)
+    }
+
+    /// Deterministic pseudo-vector for row `i` as a JSON array text.
+    fn vector_for_row(i: usize, dim: usize) -> String {
+        let mut out = String::with_capacity(dim * 8);
+        out.push('[');
+        for d in 0..dim {
+            if d > 0 {
+                out.push(',');
+            }
+            let v = ((i * 31 + d * 17) % 1000) as f64 / 1000.0;
+            out.push_str(&format!("{:.3}", v));
+        }
+        out.push(']');
+        out
+    }
+
+    fn load_vec0(rusq: &RusqConn) -> bool {
+        let path = match std::env::var("VEC0_EXTENSION_PATH") {
+            Ok(path) => path,
+            Err(_) => {
+                eprintln!("skipping: VEC0_EXTENSION_PATH not set");
+                return false;
+            }
+        };
+        unsafe {
+            rusq.load_extension_enable().unwrap();
+            rusq.load_extension(&path, None).unwrap();
+            rusq.load_extension_disable().unwrap();
+        }
+        true
+    }
+
+    /// Compares a plain table with a manually-synced vec0 index against a
+    /// partitioned table with an auto-synced vec companion: ingest, KNN,
+    /// time-windowed KNN (post-filter, vec0 0.1.9 rejects aux-column filters
+    /// inside KNN), and retention purge.
+    #[test]
+    #[ignore = "manual benchmark; requires --features vec and VEC0_EXTENSION_PATH"]
+    fn benchmark_vec_companion_vs_plain() -> sqlite3_ext::Result<()> {
+        let rusq = bench_rusqlite_conn("vec_bench");
+        if !load_vec0(&rusq) {
+            return Ok(());
+        }
+        let db = Connection::from_rusqlite(&rusq);
+        let workload = BenchmarkWorkload::from_env();
+        let dim = vec_dim();
+        let rows = workload.total_rows();
+
+        init(db)?;
+        db.execute(
+            "CREATE VIRTUAL TABLE partitioned USING partitioner(1 hour, col1 timestamp partition_column, col2 text, emb text, companion vec USING vec0(emb float[64]))",
+            (),
+        )?;
+        // The companion clause carries the dim literally; adjust if overridden.
+        if dim != DEFAULT_VEC_DIM {
+            panic!("PARTITIONER_BENCH_VEC_DIM override not supported by this benchmark's DDL");
+        }
+        db.execute("CREATE TABLE plain (col1 TEXT, col2 TEXT, emb TEXT)", ())?;
+        db.execute("CREATE INDEX plain_col1_idx ON plain(col1)", ())?;
+        db.execute(
+            "CREATE VIRTUAL TABLE plain_vec USING vec0(emb float[64])",
+            (),
+        )?;
+
+        // --- Phase 1: ingest (plain side syncs vec0 by hand, row by row) ---
+        let plain_insert = {
+            let start = Instant::now();
+            let txn = db.transaction(TransactionType::Immediate)?;
+            for i in 0..rows {
+                let (ts, payload) = bench_row_parts(workload, i);
+                let vector = vector_for_row(i, dim);
+                txn.execute(
+                    "INSERT INTO plain VALUES (?, ?, ?)",
+                    |stmt: &mut sqlite3_ext::query::Statement| {
+                        ts.as_str().bind_param(stmt, 1)?;
+                        payload.as_str().bind_param(stmt, 2)?;
+                        vector.as_str().bind_param(stmt, 3)?;
+                        Ok(())
+                    },
+                )?;
+                txn.execute(
+                    "INSERT INTO plain_vec(rowid, emb) VALUES (last_insert_rowid(), ?)",
+                    |stmt: &mut sqlite3_ext::query::Statement| {
+                        vector.as_str().bind_param(stmt, 1)?;
+                        Ok(())
+                    },
+                )?;
+            }
+            txn.commit()?;
+            start.elapsed()
+        };
+
+        let partitioned_insert = {
+            let start = Instant::now();
+            let txn = db.transaction(TransactionType::Immediate)?;
+            for i in 0..rows {
+                let (ts, payload) = bench_row_parts(workload, i);
+                let vector = vector_for_row(i, dim);
+                txn.execute(
+                    "INSERT INTO partitioned VALUES (?, ?, ?)",
+                    |stmt: &mut sqlite3_ext::query::Statement| {
+                        ts.as_str().bind_param(stmt, 1)?;
+                        payload.as_str().bind_param(stmt, 2)?;
+                        vector.as_str().bind_param(stmt, 3)?;
+                        Ok(())
+                    },
+                )?;
+            }
+            txn.commit()?;
+            start.elapsed()
+        };
+
+        let plain_vec_count: i64 =
+            db.query_row("SELECT count(*) FROM plain_vec", (), |row| {
+                Ok(row.index(0).get_i64())
+            })?;
+        let partitioned_vec_count: i64 =
+            db.query_row("SELECT count(*) FROM partitioned_vec", (), |row| {
+                Ok(row.index(0).get_i64())
+            })?;
+
+        // --- Phase 2: pure KNN, k=10, full resolution round trip ---
+        let query_vector = vector_for_row(rows / 3, dim);
+
+        let plain_knn = {
+            let start = Instant::now();
+            let mut stmt = db.prepare(
+                "SELECT rowid, distance FROM plain_vec WHERE emb MATCH ? AND k = 10 ORDER BY distance",
+            )?;
+            let rows_iter = stmt.query([query_vector.as_str()])?;
+            let mut resolved = 0usize;
+            while let Ok(Some(row)) = rows_iter.next() {
+                let rowid = row[0].get_i64();
+                let _: String = db.query_row(
+                    "SELECT col2 FROM plain WHERE rowid = ?",
+                    [rowid],
+                    |r| Ok(r.index_mut(0).get_str()?.to_owned()),
+                )?;
+                resolved += 1;
+            }
+            assert_eq!(resolved, 10);
+            start.elapsed()
+        };
+
+        let partitioned_knn = {
+            let start = Instant::now();
+            let mut stmt = db.prepare(
+                "SELECT epoch, prowid, distance FROM partitioned_vec WHERE emb MATCH ? AND k = 10 ORDER BY distance",
+            )?;
+            let rows_iter = stmt.query([query_vector.as_str()])?;
+            let mut resolved = 0usize;
+            while let Ok(Some(row)) = rows_iter.next() {
+                let epoch = row[0].get_i64();
+                let prowid = row[1].get_i64();
+                let _: String = db.query_row(
+                    &format!("SELECT col2 FROM partitioned_{} WHERE rowid = ?", epoch),
+                    [prowid],
+                    |r| Ok(r.index_mut(0).get_str()?.to_owned()),
+                )?;
+                resolved += 1;
+            }
+            assert_eq!(resolved, 10);
+            start.elapsed()
+        };
+
+        // --- Phase 3: time-windowed KNN (over-fetch 100, post-filter to 10) ---
+        let (window_start, window_end) = workload.query_window();
+        let window_start_epoch = db.query_row(
+            "SELECT strftime('%s', ?)",
+            [window_start.as_str()],
+            |row| Ok(row.index(0).get_i64()),
+        )?;
+        let window_end_epoch: i64 = db.query_row(
+            "SELECT strftime('%s', ?)",
+            [window_end.as_str()],
+            |row| Ok(row.index(0).get_i64()),
+        )?;
+
+        let plain_window_knn = {
+            let start = Instant::now();
+            let mut stmt = db.prepare(
+                "SELECT rowid FROM plain_vec WHERE emb MATCH ? AND k = 100 ORDER BY distance",
+            )?;
+            let rows_iter = stmt.query([query_vector.as_str()])?;
+            let mut kept = 0usize;
+            while let Ok(Some(row)) = rows_iter.next() {
+                let in_window: i64 = db.query_row(
+                    "SELECT count(*) FROM plain WHERE rowid = ? AND col1 >= ? AND col1 < ?",
+                    |stmt: &mut sqlite3_ext::query::Statement| {
+                        row[0].get_i64().bind_param(stmt, 1)?;
+                        window_start.as_str().bind_param(stmt, 2)?;
+                        window_end.as_str().bind_param(stmt, 3)?;
+                        Ok(())
+                    },
+                    |r| Ok(r.index(0).get_i64()),
+                )?;
+                kept += in_window as usize;
+                if kept >= 10 {
+                    break;
+                }
+            }
+            start.elapsed()
+        };
+
+        let partitioned_window_knn = {
+            let start = Instant::now();
+            let mut stmt = db.prepare(
+                "SELECT epoch FROM partitioned_vec WHERE emb MATCH ? AND k = 100 ORDER BY distance",
+            )?;
+            let rows_iter = stmt.query([query_vector.as_str()])?;
+            let mut kept = 0usize;
+            while let Ok(Some(row)) = rows_iter.next() {
+                let epoch = row[0].get_i64();
+                let partition_start = epoch - epoch.rem_euclid(3600);
+                if partition_start >= window_start_epoch && partition_start < window_end_epoch {
+                    kept += 1;
+                    if kept >= 10 {
+                        break;
+                    }
+                }
+            }
+            start.elapsed()
+        };
+
+        // --- Phase 4: retention purge of one hour ---
+        let (delete_start, delete_end) = workload.delete_window();
+        let delete_start_epoch: i64 = db.query_row(
+            "SELECT strftime('%s', ?)",
+            [delete_start.as_str()],
+            |row| Ok(row.index(0).get_i64()),
+        )?;
+
+        let plain_purge = {
+            let start = Instant::now();
+            db.execute(
+                &format!(
+                    "DELETE FROM plain_vec WHERE rowid IN (SELECT rowid FROM plain WHERE col1 >= '{delete_start}' AND col1 < '{delete_end}')"
+                ),
+                (),
+            )?;
+            db.execute(
+                &format!(
+                    "DELETE FROM plain WHERE col1 >= '{delete_start}' AND col1 < '{delete_end}'"
+                ),
+                (),
+            )?;
+            start.elapsed()
+        };
+
+        let partitioned_purge = {
+            let partition_name: String = db.query_row(
+                "SELECT partition_table FROM partitioned_lookup WHERE partition_value = ?",
+                [delete_start_epoch],
+                |row| Ok(row.index_mut(0).get_str()?.to_string()),
+            )?;
+            let start = Instant::now();
+            db.execute(
+                &format!("DELETE FROM partitioned_vec WHERE epoch = {}", delete_start_epoch),
+                (),
+            )?;
+            db.execute(&format!("DROP TABLE {}", partition_name), ())?;
+            db.execute(
+                "DELETE FROM partitioned_lookup WHERE partition_table = ?",
+                [partition_name.as_str()],
+            )?;
+            db.execute(
+                "DELETE FROM partitioned_stats WHERE partition_table = ?",
+                [partition_name.as_str()],
+            )?;
+            start.elapsed()
+        };
+
+        println!("storage={} dim={} workload={}", bench_storage_label(), dim, workload.label());
+        println!(
+            "ingest: partitioned+companion={:?} | plain+manual vec sync={:?}",
+            partitioned_insert, plain_insert
+        );
+        println!(
+            "vec row counts: partitioned_vec={} plain_vec={}",
+            partitioned_vec_count, plain_vec_count
+        );
+        println!(
+            "knn k=10 (with resolution): partitioned={:?} | plain={:?}",
+            partitioned_knn, plain_knn
+        );
+        println!(
+            "windowed knn k=10 (over-fetch 100, post-filter): partitioned={:?} | plain={:?}",
+            partitioned_window_knn, plain_window_knn
+        );
+        println!(
+            "retention purge (1 hour of rows + vectors): partitioned={:?} | plain={:?}",
+            partitioned_purge, plain_purge
+        );
+
+        let _ = std::fs::remove_file(temp_benchmark_db_path("vec_bench"));
+        Ok(())
+    }
+}
