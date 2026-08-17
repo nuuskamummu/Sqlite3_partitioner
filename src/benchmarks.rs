@@ -889,7 +889,10 @@ mod vec_bench {
         read_env_usize("PARTITIONER_BENCH_VEC_DIM", DEFAULT_VEC_DIM)
     }
 
-    /// Deterministic pseudo-vector for row `i` as a JSON array text.
+    /// Deterministic pseudo-random vector for row `i` as a JSON array text.
+    /// splitmix64 per (row, dimension) so vectors are unique and spread out —
+    /// a modular formula would repeat every 1000 rows and collapse all
+    /// nearest-neighbor distances to ~0.
     fn vector_for_row(i: usize, dim: usize) -> String {
         let mut out = String::with_capacity(dim * 8);
         out.push('[');
@@ -897,8 +900,14 @@ mod vec_bench {
             if d > 0 {
                 out.push(',');
             }
-            let v = ((i * 31 + d * 17) % 1000) as f64 / 1000.0;
-            out.push_str(&format!("{:.3}", v));
+            let mut z = (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(d as u64);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let v = (z >> 11) as f64 / (1u64 << 53) as f64;
+            out.push_str(&format!("{:.4}", v));
         }
         out.push(']');
         out
@@ -1182,8 +1191,9 @@ mod vec_bench {
 
         // --- Phase 5: the target workflow — distance <= threshold within a
         // time window spanning multiple partitions, ordered by time DESC.
-        // vec0 (0.1.9) has no distance-threshold scan, so both sides over-fetch
-        // KNN k=500 and filter by distance + time afterwards.
+        // Pre-filter strategy: vec0 accepts `rowid IN (subquery)` inside a KNN
+        // query, so both sides constrain the KNN to rows in the time window
+        // first instead of over-fetching and post-filtering.
         // Threshold: distance of the 20th nearest neighbor overall.
         let threshold: f64 = {
             let mut stmt = db.prepare(
@@ -1200,12 +1210,13 @@ mod vec_bench {
             let start = Instant::now();
             let sql = format!(
                 "WITH knn AS MATERIALIZED (
-                   SELECT rowid, distance FROM plain_vec WHERE emb MATCH ? AND k = 500
+                   SELECT rowid, distance FROM plain_vec
+                   WHERE emb MATCH ? AND k = 100
+                     AND rowid IN (SELECT rowid FROM plain WHERE col1 >= '{window_start}' AND col1 < '{window_end}')
                  )
                  SELECT p.col1, p.col2, knn.distance FROM knn
                  JOIN plain p ON p.rowid = knn.rowid
-                 WHERE p.col1 >= '{window_start}' AND p.col1 < '{window_end}'
-                   AND knn.distance <= ?
+                 WHERE knn.distance <= ?
                  ORDER BY p.col1 DESC LIMIT 20"
             );
             let mut stmt = db.prepare(&sql)?;
@@ -1219,9 +1230,11 @@ mod vec_bench {
             (start.elapsed(), count)
         };
 
-        // Partitioned side: resolve locators through a UNION of the partition
-        // tables overlapping the window (looked up from the lookup table),
-        // ordered by time descending across partition boundaries.
+        // Partitioned side: pre-filter vec rowids through the keys table by
+        // epoch window (indexed), select the (epoch, prowid) locators straight
+        // from the vec aux columns (selectable, just not constrainable), then
+        // resolve through a UNION of the partition tables overlapping the
+        // window, ordered by time descending across partition boundaries.
         let window_partitions: Vec<(i64, String)> = {
             let mut stmt = db.prepare(
                 "SELECT partition_value, partition_table FROM partitioned_lookup
@@ -1246,7 +1259,10 @@ mod vec_bench {
             let start = Instant::now();
             let sql = format!(
                 "WITH knn AS MATERIALIZED (
-                   SELECT epoch, prowid, distance FROM partitioned_vec WHERE emb MATCH ? AND k = 500
+                   SELECT epoch, prowid, distance FROM partitioned_vec
+                   WHERE emb MATCH ? AND k = 100
+                     AND rowid IN (SELECT vec_rowid FROM partitioned_vec_keys
+                                   WHERE epoch >= {window_start_epoch} AND epoch < {window_end_epoch})
                  )
                  SELECT e.col1, e.col2, knn.distance FROM knn
                  JOIN ({}) e ON e.ep = knn.epoch AND e.r = knn.prowid
