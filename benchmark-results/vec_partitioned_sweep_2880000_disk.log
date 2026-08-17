@@ -1,0 +1,8 @@
+vec benchmark: retention complete
+storage=disk dim=64 workload=1000 rows/minute for 2880 minutes (2880000 total rows)
+ingest: partitioned+partition-local-vec=104.609043s | plain+global-vec=86.467846709s
+vector partitions=48 vector rows: partitioned=2880000 plain=2880000
+knn k=10: one partition+resolve=175.767ms | plain global+resolve=3.467435s
+global knn k=10 (no time filter): partitioned merge across all 48 partitions=5.419949167s | plain global=3.467435s
+windowed knn k=10: partitioned merge across 2 partitions=12.467ms | plain global index with time filter=449.286708ms
+retention (one data/vector partition): partitioned drop-pair=220.75675ms | plain vector+row delete=1.734101667s
