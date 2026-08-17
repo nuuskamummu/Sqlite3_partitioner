@@ -196,6 +196,14 @@ For a range spanning multiple partitions, run the same query for each paired
 There is deliberately no one-table global KNN query: that would require a
 separate global vector index and make retention delete vector rows individually.
 
+The tradeoff, measured (dim-64 vectors, see `benchmark-results/`): queries
+filtered by time scan only the matching partitions, so they stay flat as
+history grows (windowed KNN ~3ms in-memory at 2.88M rows vs ~200ms for a
+global vec0 index; retention is a ~5ms DROP instead of ~1.4s of row deletes).
+An unfiltered full-history KNN is at parity in-memory but slower on disk at
+scale — scattered reads across many small tables — so if you never query by
+time, a plain vec0 table is the better tool.
+
 The mechanism is generic: companions implement a small Rust trait, and new
 companion modules can be registered without touching the core partitioning
 code.
