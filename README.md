@@ -161,8 +161,17 @@ runs on a schedule by itself; the extension only acts when called.
 A partitioned table can declare **companion shadow tables** backed by other
 SQLite extensions, kept in sync with the data partitions automatically. The
 reference implementation is vector search via
-[sqlite-vec](https://github.com/asg017/sqlite-vec) (requires building with
-`--features vec` and loading the vec0 extension):
+[sqlite-vec](https://github.com/asg017/sqlite-vec). The prebuilt release
+binaries already include vec support (`--features vec` when building from
+source); load the vec0 extension first, then the partitioner:
+
+```
+.load ./vec0
+.load ./sqlite3_partitioner   -- entry point: sqlite3_partitioner_init
+```
+
+vec0 must be loaded whenever partitions are created, since each new partition
+lazily creates its companion vec0 table. Queries and expiry work regardless.
 
 ```sql
 CREATE VIRTUAL TABLE events USING partitioner(

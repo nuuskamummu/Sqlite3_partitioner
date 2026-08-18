@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Build
         run: |
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --features vec --target ${{ matrix.target }}
           mv "./target/${{ matrix.target }}/release/${{ matrix.prefix }}partitioner.${{ matrix.ext }}" "./target/${{ matrix.target }}/release/${{ matrix.file_name }}"
       - name: Upload files to a GitHub release
         uses: svenstaro/upload-release-action@2.11.5
