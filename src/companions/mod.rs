@@ -23,6 +23,7 @@ use crate::ColumnDeclaration;
 use crate::ColumnDeclarations;
 
 use super::shadow_tables::interface::PendingRow;
+use crate::constraints::CompanionScanPlan;
 
 #[cfg(feature = "vec")]
 mod vec;
@@ -201,11 +202,38 @@ pub trait Companion: Debug {
     }
 }
 
+/// Resolves a companion scan plan against the xFilter arguments: returns the
+/// driver constraint value plus the hidden-column scan parameters in the
+/// companion's [`Companion::hidden_columns`] declaration order
+/// (`None` = unconstrained).
+pub(crate) fn resolve_scan_args<'a>(
+    companion: &dyn Companion,
+    scan_plan: &CompanionScanPlan,
+    args: &[&'a ValueRef],
+) -> ExtResult<(&'a ValueRef, Vec<Option<&'a ValueRef>>)> {
+    let arg_at = |index: i32| -> ExtResult<&'a ValueRef> {
+        args.get(index as usize).copied().ok_or_else(|| {
+            sqlite3_ext::Error::Module(format!("Missing argument for constraint index {}", index))
+        })
+    };
+    let driver = arg_at(scan_plan.driver.get_constraint_index())?;
+    let hidden_columns = companion.hidden_columns();
+    let mut params: Vec<Option<&ValueRef>> = vec![None; hidden_columns.len()];
+    for (name, clause) in &scan_plan.params {
+        if let Some(position) = hidden_columns
+            .iter()
+            .position(|declaration| declaration.get_name() == name)
+        {
+            params[position] = Some(arg_at(clause.get_constraint_index())?);
+        }
+    }
+    Ok((driver, params))
+}
+
 /// Extracts the indices of main-schema columns referenced by a companion's
 /// module arguments. The first identifier of each comma-separated argument is
 /// considered a potential column reference.
-pub(crate) fn synced_column_indices(args: &str, columns: &ColumnDeclarations) -> Vec<usize> {
-    args.split(',')
+pub(crate) fn synced_column_indices(args: &str, columns: &ColumnDeclarations) -> Vec<usize> {    args.split(',')
         .filter_map(|arg| arg.split_whitespace().next())
         .filter_map(|name| {
             columns

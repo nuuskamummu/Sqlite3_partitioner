@@ -135,20 +135,13 @@ impl<'vtab> RangePartitionCursor<'vtab> {
         )
     }
 
-    /// Initializes cursor with partitions matching specified conditions.
-    ///
-    /// # Parameters
-    /// * `partition_conditions` - Optional conditions specific to the partition table.
-    /// * `lookup_conditions` - Optional conditions for looking up partitions.
-    ///
-    /// # Returns
-    /// An iterator over partitions that match the given conditions.
-    fn initialize_partitions<'b>(
-        &mut self,
-        partition_conditions: Option<&'b Conditions<'b>>,
-        lookup_conditions: Option<&'b Conditions<'b>>,
+    /// Resolves the partitions to query for the given lookup conditions,
+    /// honoring the requested partition scan order (reversed for DESC).
+    fn pruned_partitions(
+        &self,
+        lookup_conditions: Option<&Conditions>,
         partition_order: Option<SortDirection>,
-    ) -> ExtResult<std::vec::IntoIter<Partition>> {
+    ) -> ExtResult<Vec<(i64, String)>> {
         let ranges = lookup_conditions
             .zip(Some(self.meta_table.interface.partition_interval()))
             .map(|(conditions, interval)| {
@@ -165,6 +158,24 @@ impl<'vtab> RangePartitionCursor<'vtab> {
         if partition_order == Some(SortDirection::Desc) {
             partitions_in_range.reverse();
         }
+        Ok(partitions_in_range)
+    }
+
+    /// Initializes cursor with partitions matching specified conditions.
+    ///
+    /// # Parameters
+    /// * `partition_conditions` - Optional conditions specific to the partition table.
+    /// * `lookup_conditions` - Optional conditions for looking up partitions.
+    ///
+    /// # Returns
+    /// An iterator over partitions that match the given conditions.
+    fn initialize_partitions<'b>(
+        &mut self,
+        partition_conditions: Option<&'b Conditions<'b>>,
+        lookup_conditions: Option<&'b Conditions<'b>>,
+        partition_order: Option<SortDirection>,
+    ) -> ExtResult<std::vec::IntoIter<Partition>> {
+        let partitions_in_range = self.pruned_partitions(lookup_conditions, partition_order)?;
         let order_column = partition_order
             .map(|direction| (self.meta_table.interface.partition_column_name(), direction));
         let prepared_partitions: ExtResult<Vec<Partition>> = partitions_in_range.iter().try_fold(
@@ -201,10 +212,6 @@ impl<'vtab> RangePartitionCursor<'vtab> {
 
     /// Runs a companion-driven scan: prune partitions via the lookup conditions,
     /// let the companion produce row hits, and materialize the hit rows.
-    ///
-    /// The remaining row-level conditions (partition-column predicates that cut
-    /// inside a partition, or filters on other columns) are applied to the row
-    /// fetch — best_index promised SQLite (omit=true) that xFilter enforces them.
     fn initialize_companion_scan(
         &mut self,
         scan_plan: CompanionScanPlan,
@@ -212,17 +219,7 @@ impl<'vtab> RangePartitionCursor<'vtab> {
         partition_conditions: Option<&Conditions>,
         args: &[&mut ValueRef],
     ) -> ExtResult<()> {
-        let ranges = lookup_conditions
-            .zip(Some(self.meta_table.interface.partition_interval()))
-            .map(|(conditions, interval)| {
-                aggregate_conditions_to_ranges(conditions.as_slice(), interval)
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let (lower_bound, upper_bound) = ranges
-            .get("partition_value")
-            .unwrap_or(&(Bound::Unbounded, Bound::Unbounded));
-        let partitions = self.get_partitions_to_query(lower_bound, upper_bound)?;
+        let partitions = self.pruned_partitions(lookup_conditions, None)?;
 
         let companion = self
             .meta_table
@@ -237,27 +234,9 @@ impl<'vtab> RangePartitionCursor<'vtab> {
                 ))
             })?;
 
-        let arg_at = |index: i32| -> ExtResult<&ValueRef> {
-            args.get(index as usize).map(|value| &**value).ok_or_else(|| {
-                sqlite3_ext::Error::Module(format!(
-                    "Missing argument for constraint index {}",
-                    index
-                ))
-            })
-        };
-        let driver = arg_at(scan_plan.driver.get_constraint_index())?;
-
-        // Scan parameters in the companion's hidden-column declaration order.
-        let hidden_columns = companion.hidden_columns();
-        let mut params: Vec<Option<&ValueRef>> = vec![None; hidden_columns.len()];
-        for (name, clause) in &scan_plan.params {
-            if let Some(position) = hidden_columns
-                .iter()
-                .position(|declaration| declaration.get_name() == name)
-            {
-                params[position] = Some(arg_at(clause.get_constraint_index())?);
-            }
-        }
+        let args_view: Vec<&ValueRef> = args.iter().map(|value| &**value).collect();
+        let (driver, params) =
+            crate::companions::resolve_scan_args(companion.as_ref(), &scan_plan, &args_view)?;
 
         let hits = companion.scan(
             self.meta_table.connection,
@@ -267,25 +246,34 @@ impl<'vtab> RangePartitionCursor<'vtab> {
             &params,
         )?;
 
+        let rows = self.materialize_scan_hits(hits, &partitions, partition_conditions)?;
+        let mut scan_rows = rows.into_iter();
+        self.current_scan_row = scan_rows.next();
+        if self.current_scan_row.is_none() {
+            self.eof = true;
+        }
+        self.scan_rows = Some(scan_rows);
+        Ok(())
+    }
+
+    /// Materializes companion scan hits into full rows.
+    ///
+    /// The remaining row-level conditions (partition-column predicates that cut
+    /// inside a partition, or filters on other columns) are applied to the row
+    /// fetch — best_index promised SQLite (omit=true) that xFilter enforces
+    /// them. A hit whose row no longer matches is dropped from the result.
+    fn materialize_scan_hits(
+        &self,
+        hits: Vec<crate::companions::CompanionHit>,
+        partitions: &[(i64, String)],
+        partition_conditions: Option<&Conditions>,
+    ) -> ExtResult<Vec<ScanRow>> {
         let partition_names: HashMap<i64, &str> = partitions
             .iter()
             .map(|(value, name)| (*value, name.as_str()))
             .collect();
         let real_column_count = self.meta_table.interface.real_column_count();
-        let condition_clause = partition_conditions.map(|conditions| {
-            conditions
-                .as_slice()
-                .iter()
-                .map(|condition| {
-                    format!(
-                        "{} {} ?",
-                        condition.column,
-                        crate::ConstraintOpDef::from(*condition.operator)
-                    )
-                })
-                .collect::<Vec<String>>()
-                .join(" AND ")
-        });
+        let condition_clause = partition_conditions.map(|conditions| conditions.to_sql());
         let mut rows = Vec::with_capacity(hits.len());
         for hit in hits {
             let partition_name = partition_names
@@ -311,14 +299,9 @@ impl<'vtab> RangePartitionCursor<'vtab> {
                 sqlite3_ext::Error::Module(format!("row fetch bind: {}", err))
             })?;
             if let Some(conditions) = partition_conditions {
-                for (index, condition) in conditions.as_slice().iter().enumerate() {
-                    condition
-                        .value
-                        .bind_param(&mut stmt, (index + 2) as i32)
-                        .map_err(|err| {
-                            sqlite3_ext::Error::Module(format!("row fetch bind: {}", err))
-                        })?;
-                }
+                conditions.bind_to(&mut stmt, 2).map_err(|err| {
+                    sqlite3_ext::Error::Module(format!("row fetch bind: {}", err))
+                })?;
             }
             let query_rows = stmt.query(()).map_err(|err| {
                 sqlite3_ext::Error::Module(format!("row fetch query: {}", err))
@@ -340,14 +323,7 @@ impl<'vtab> RangePartitionCursor<'vtab> {
                 values,
             });
         }
-
-        let mut scan_rows = rows.into_iter();
-        self.current_scan_row = scan_rows.next();
-        if self.current_scan_row.is_none() {
-            self.eof = true;
-        }
-        self.scan_rows = Some(scan_rows);
-        Ok(())
+        Ok(rows)
     }
 }
 

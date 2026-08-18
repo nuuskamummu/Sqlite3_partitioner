@@ -1,8 +1,7 @@
-use sqlite3_ext::query::{QueryResult, Statement, ToParam};
+use sqlite3_ext::query::{QueryResult, Statement};
 use sqlite3_ext::{Connection, FallibleIteratorMut};
 
 use crate::constraints::{Conditions, SortDirection};
-use crate::ConstraintOpDef;
 
 /// Represents a database partition, encapsulating the SQL statement for querying
 /// the partition and the partition's name. It provides functionality for iterating over
@@ -86,21 +85,7 @@ impl<'vtab, 'query> TryFrom<PartitionQuery<'vtab, 'query>> for Partition {
             order,
         } = query;
         let where_clause = if let Some(conditions) = conditions {
-            let condition_str = conditions
-                .as_slice()
-                .iter()
-                .map(|condition| {
-                    format!(
-                        "{} {} {}",
-                        condition.column,
-                        ConstraintOpDef::from(*condition.operator),
-                        "?"
-                    )
-                })
-                .collect::<Vec<String>>()
-                .join(" AND ");
-
-            format!("WHERE {}", condition_str)
+            format!("WHERE {}", conditions.to_sql())
         } else {
             String::new()
         };
@@ -115,13 +100,7 @@ impl<'vtab, 'query> TryFrom<PartitionQuery<'vtab, 'query>> for Partition {
         );
         let mut stmt = db.prepare(&sql)?;
         if let Some(conditions) = conditions {
-            conditions
-                .as_slice()
-                .iter()
-                .enumerate()
-                .try_for_each(|(index, condition)| {
-                    condition.value.bind_param(&mut stmt, (index + 1) as i32)
-                })?;
+            conditions.bind_to(&mut stmt, 1)?;
         }
 
         Ok(Partition::from((partition_name.to_string(), stmt)))

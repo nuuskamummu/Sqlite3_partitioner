@@ -1,5 +1,7 @@
 use sqlite3_ext::{vtab::ConstraintOp, ValueRef};
 
+use crate::ConstraintOpDef;
+
 /// Represents an individual condition in a SQL "WHERE" clause, encapsulating a column name,
 /// a comparison operator, and a value for comparison.
 ///
@@ -26,6 +28,38 @@ impl<'a> Conditions<'a> {
     /// Returns a slice of `Condition` references.
     pub fn as_slice(&self) -> &[Condition<'a>] {
         &self.inner
+    }
+
+    /// Renders the conditions as a SQL WHERE clause body (`col OP ? AND ...`).
+    /// Values are bound separately, in slice order.
+    pub fn to_sql(&self) -> String {
+        self.inner
+            .iter()
+            .map(|condition| {
+                format!(
+                    "{} {} ?",
+                    condition.column,
+                    ConstraintOpDef::from(*condition.operator)
+                )
+            })
+            .collect::<Vec<String>>()
+            .join(" AND ")
+    }
+
+    /// Binds the condition values to a prepared statement, starting at the
+    /// given 1-based parameter position.
+    pub fn bind_to(
+        &self,
+        stmt: &mut sqlite3_ext::query::Statement,
+        first_position: i32,
+    ) -> sqlite3_ext::Result<()> {
+        use sqlite3_ext::query::ToParam;
+        for (index, condition) in self.inner.iter().enumerate() {
+            condition
+                .value
+                .bind_param(stmt, first_position + index as i32)?;
+        }
+        Ok(())
     }
 }
 impl<'a> FromIterator<Condition<'a>> for Conditions<'a> {
