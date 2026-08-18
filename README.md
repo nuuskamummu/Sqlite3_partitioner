@@ -43,7 +43,14 @@ global [sqlite-vec](https://github.com/asg017/sqlite-vec) index):
 | Windowed KNN (2h range), in-memory | 3.2 ms | 109.2 ms | **~34× faster** |
 | Windowed KNN (2h range), on-disk | 9.6 ms | 192.1 ms | **~20× faster** |
 | Global KNN (no time filter), in-memory | 37.7 ms | 36.1 ms | parity |
+| Global KNN (no time filter), on-disk | 115.3 ms | 114.0 ms | parity at 1.44M; ~1.6× slower at 2.88M |
+| Ingest 1.44M rows with vectors | 40.2 s (mem) / 50.3 s (disk) | 36.0 s (mem) / 46.0 s (disk) | ~10% slower |
 | Expire vectors with their rows | ~5 ms (`DROP TABLE` pair) | 0.9–1.1 s (ranged deletes) | **~60–160× faster** |
+
+The honest tradeoff: you pay ~10% on ingest and, at multi-million scale on
+disk, up to ~1.6× on unfiltered global KNN (scattered reads across many small
+vec0 tables). In return, time-windowed similarity search and retention get
+dramatically cheaper — which is the workload this feature exists for.
 
 Retention is roughly constant in partition size while a ranged `DELETE` is
 O(rows), so the gap grows with partition size. Ad-hoc queries that don't
