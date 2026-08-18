@@ -177,24 +177,30 @@ CREATE VIRTUAL TABLE events USING partitioner(
 Each data partition gets a matching vec0 table using the same rowids, e.g.
 `events_1767225600` is paired with `events_1767225600_vec`. Inserts, updates,
 and deletes on `events` stay in sync. Expiry drops both tables together, so no
-vectors are retained in a shared global index. Query each time partition that
-can contribute to the result, then merge its KNN candidates with those from the
-other relevant partitions:
+vectors are retained in a shared global index.
+
+The partitioned table itself answers KNN queries directly — the companion
+drives the scan through two hidden columns (`k` and `distance`), and partition
+predicates prune which partitions are searched:
 
 ```sql
-WITH knn AS MATERIALIZED (
-    SELECT rowid, distance FROM events_1767225600_vec
-    WHERE embedding MATCH '[...]' AND k = 10
-    ORDER BY distance
-)
-SELECT e.*, knn.distance
-FROM knn JOIN events_1767225600 AS e ON e.rowid = knn.rowid;
+SELECT ts, embedding, distance FROM events
+WHERE embedding MATCH '[0.89, 0.54, ...]'
+  AND ts >= '2026-08-01' AND ts < '2026-08-15'
+  AND k = 10
+ORDER BY distance;
 ```
 
-For a range spanning multiple partitions, run the same query for each paired
-`*_vec` table and merge the candidates in the application (or in generated SQL).
-There is deliberately no one-table global KNN query: that would require a
-separate global vector index and make retention delete vector rows individually.
+Under the hood each pruned partition's vec0 table contributes its top-k and the
+candidates are merged and re-ranked globally, so the result is the exact
+global top-k within the window. Rows returned by a MATCH scan carry working
+rowids, so `UPDATE ... WHERE rowid = ?` and `DELETE ... WHERE rowid = ?` behave
+as usual. One caveat: `k` limits candidates *per partition* before other
+row-level filters apply, so a very selective window may see slightly fewer than
+`k` rows — ask for a larger `k` when combining tight filters.
+
+The per-partition `*_vec` tables also remain directly queryable if you want to
+write the merge yourself.
 
 The tradeoff, measured (dim-64 vectors, see `benchmark-results/`): queries
 filtered by time scan only the matching partitions, so they stay flat as
@@ -204,9 +210,10 @@ An unfiltered full-history KNN is at parity in-memory but slower on disk at
 scale — scattered reads across many small tables — so if you never query by
 time, a plain vec0 table is the better tool.
 
-The mechanism is generic: companions implement a small Rust trait, and new
-companion modules can be registered without touching the core partitioning
-code.
+The mechanism is generic: the core knows only that companions may declare
+hidden columns and claim constraints to drive scans; all vec0/MATCH knowledge
+lives behind `--features vec`. New companion modules can be registered without
+touching the core partitioning code.
 
 ## How it works
 

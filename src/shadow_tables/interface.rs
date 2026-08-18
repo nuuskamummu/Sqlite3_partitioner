@@ -338,12 +338,28 @@ impl<'vtab> VirtualTable<'vtab> {
 
     /// Retrieves the SQL query to create a table based on the template table's schema.
     ///
+    /// Hidden columns declared by companions are appended after the real columns;
+    /// they exist only on the virtual table, never on physical partitions.
+    ///
     /// # Returns
     /// The SQL CREATE TABLE query string.
     pub fn create_table_query(&self) -> String {
         let mut interface_schema = self.template_table.schema().clone();
         interface_schema.name = self.base_name.clone();
+        for companion in &self.companions {
+            interface_schema
+                .columns
+                .0
+                .extend(companion.hidden_columns());
+        }
         interface_schema.table_query()
+    }
+
+    /// Number of real (non-hidden) columns — the count present on physical
+    /// partition tables. Trailing columns beyond this are companion-hidden and
+    /// must be stripped from INSERT/UPDATE argument lists.
+    pub fn real_column_count(&self) -> usize {
+        self.template_table.columns().0.len()
     }
 
     /// Accesses the column declarations of the template table.

@@ -70,6 +70,22 @@ impl Display for SortDirection {
     }
 }
 
+/// A scan driven by a companion instead of the generic per-partition WHERE
+/// path. The companion receives the driver constraint value (e.g. the MATCH
+/// vector) plus its hidden-column scan parameters, and yields rows itself.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CompanionScanPlan {
+    /// Name of the companion driving the scan (`<base>_<name>` shadows).
+    pub companion: String,
+    /// The claimed driver constraint (column, op, argv index).
+    pub driver: WhereClause,
+    /// Hidden column name -> its constraint (argv index), in declaration order.
+    pub params: Vec<(String, WhereClause)>,
+    /// Hidden column whose ascending order the scan already produces, set when
+    /// a single-term ORDER BY on it was consumed.
+    pub order_by_hidden: Option<String>,
+}
+
 /// The serialized scan plan passed from `best_index` to `xFilter` via `index_str`:
 /// the WHERE clauses to enforce plus, when SQLite's ORDER BY can be satisfied by the
 /// natural partition ordering, the direction in which to scan partitions.
@@ -77,13 +93,20 @@ impl Display for SortDirection {
 pub struct ScanPlan {
     pub where_clauses: WhereClauses,
     pub partition_order: Option<SortDirection>,
+    /// Set when a companion claimed a constraint and drives the scan.
+    pub companion_scan: Option<CompanionScanPlan>,
 }
 
 impl ScanPlan {
-    pub fn new(where_clauses: WhereClauses, partition_order: Option<SortDirection>) -> Self {
+    pub fn new(
+        where_clauses: WhereClauses,
+        partition_order: Option<SortDirection>,
+        companion_scan: Option<CompanionScanPlan>,
+    ) -> Self {
         Self {
             where_clauses,
             partition_order,
+            companion_scan,
         }
     }
 }
@@ -125,5 +148,50 @@ impl Display for WhereClause {
             self.column_name,
             ConstraintOpDef::from(self.operator),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constraints::CompanionScanPlan;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_scan_plan_with_companion_scan_ron_roundtrip() {
+        let mut clauses = HashMap::new();
+        clauses.insert(
+            "partition_table".to_string(),
+            vec![WhereClause::new(
+                "col1".to_string(),
+                ConstraintOp::GE,
+                0,
+            )],
+        );
+        let plan = ScanPlan::new(
+            WhereClauses(clauses),
+            Some(SortDirection::Asc),
+            Some(CompanionScanPlan {
+                companion: "vec".to_string(),
+                driver: WhereClause::new("emb".to_string(), ConstraintOp::Match, 1),
+                params: vec![(
+                    "k".to_string(),
+                    WhereClause::new("k".to_string(), ConstraintOp::Eq, 2),
+                )],
+                order_by_hidden: Some("distance".to_string()),
+            }),
+        );
+        let serialized = ron::to_string(&plan).unwrap();
+        let deserialized: ScanPlan = ron::from_str(&serialized).unwrap();
+        assert_eq!(format!("{:?}", plan), format!("{:?}", deserialized));
+    }
+
+    #[test]
+    fn test_scan_plan_without_companion_scan_ron_roundtrip() {
+        let plan = ScanPlan::new(WhereClauses(HashMap::new()), None, None);
+        let serialized = ron::to_string(&plan).unwrap();
+        let deserialized: ScanPlan = ron::from_str(&serialized).unwrap();
+        assert!(deserialized.companion_scan.is_none());
+        assert_eq!(format!("{:?}", plan), format!("{:?}", deserialized));
     }
 }

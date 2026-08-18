@@ -31,6 +31,9 @@ nav_order: 3
   virtual table — e.g. sqlite-vec `vec0` for vector search — in sync with the
   data partitions. Each data partition gets its own companion table sharing its
   rowids, so retention cleanup drops the partition's vectors with the partition
-  itself (no row-by-row index deletes).
+  itself (no row-by-row index deletes). Companions can also drive scans on the
+  partitioned table itself: `WHERE embedding MATCH '[...]' AND ts >= ... AND k
+  = 10 ORDER BY distance` runs a partition-pruned, globally re-ranked KNN in
+  plain SQL.
 - Cross-platform: prebuilt extensions for macOS (arm64), Linux (x86_64), and
   Windows (x86_64).

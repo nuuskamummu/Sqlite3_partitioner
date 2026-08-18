@@ -4,7 +4,7 @@ use crate::error::TableError;
 
 pub use self::{
     conditions::{Condition, Conditions},
-    where_clauses::{ScanPlan, SortDirection, WhereClause, WhereClauses},
+    where_clauses::{CompanionScanPlan, ScanPlan, SortDirection, WhereClause, WhereClauses},
 };
 
 mod conditions;

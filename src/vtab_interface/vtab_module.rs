@@ -2,7 +2,7 @@ use std::borrow::BorrowMut;
 use std::ops::Bound;
 use std::sync::RwLock;
 
-use crate::constraints::{ScanPlan, SortDirection, WhereClause};
+use crate::constraints::{CompanionScanPlan, ScanPlan, SortDirection, WhereClause};
 use crate::operations::{delete::delete, insert::insert, update::update};
 use crate::shadow_tables::interface::VirtualTable;
 use crate::utils::validation::validate_and_map_columns;
@@ -355,7 +355,8 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                 })?;
                 let id = info.rowid_mut().get_i64();
                 if let Some((db_rowid, partition_name)) = rowid_mapper.get(id as usize) {
-                    let cols = &info.args()[1..];
+                    // Strip trailing companion-hidden column values (see insert).
+                    let cols = &info.args()[1..1 + self.interface.real_column_count()];
                     let column_refs = cols.iter().map(|value| &**value).collect::<Vec<_>>();
                     let (_validated_columns, partition_column) = validate_and_map_columns(
                         column_refs.as_slice(),
@@ -406,8 +407,12 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                             }
                         }
                     } else {
-                        let (sql, mut values) =
-                            update(partition_name, &self.interface, info.args_mut())?;
+                        let real_column_count = self.interface.real_column_count();
+                        let (sql, mut values) = update(
+                            partition_name,
+                            &self.interface,
+                            &mut info.args_mut()[..1 + real_column_count],
+                        )?;
                         let mut stmt = self.connection.prepare(&sql)?;
                         values
                             .iter_mut()
@@ -421,7 +426,8 @@ impl<'vtab> UpdateVTab<'vtab> for PartitionMetaTable<'vtab> {
                         // Non-moving update: replace the companion row so synced
                         // columns (e.g. embeddings) stay current.
                         if let Some(value) = self.interface.partition_value_of(partition_name)? {
-                            let new_cols = &info.args()[1..];
+                            let new_cols =
+                                &info.args()[1..1 + self.interface.real_column_count()];
                             let new_col_refs =
                                 new_cols.iter().map(|value| &**value).collect::<Vec<_>>();
                             for companion in self.interface.companions() {
@@ -528,15 +534,129 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
         // per-partition WHERE clauses, all other constraints via per-partition WHERE
         // clauses. We therefore set omit=true so SQLite does not redundantly re-check
         // each row. If xFilter ever stops applying a constraint, its omit must go.
+        //
+        // Companions claim constraints BEFORE the generic path: a driver
+        // constraint (e.g. MATCH on a synced column) and hidden-column scan
+        // parameters (e.g. `k = 10`) are recorded into a CompanionScanPlan and
+        // excluded from the per-partition WHERE clauses, where they would be
+        // invalid SQL on plain partition tables.
+        let real_column_count = self.interface.columns().0.len();
+        let companions = self.interface.companions();
+        // Flattened hidden columns in schema order: (companion index, declaration).
+        let hidden_columns: Vec<(usize, crate::ColumnDeclaration)> = companions
+            .iter()
+            .enumerate()
+            .flat_map(|(index, companion)| {
+                companion
+                    .hidden_columns()
+                    .into_iter()
+                    .map(move |declaration| (index, declaration))
+            })
+            .collect();
+        let mut companion_scan: Option<CompanionScanPlan> = None;
+        // (companion index, hidden column name, clause) for claimed scan params.
+        let mut scan_params: Vec<(usize, String, WhereClause)> = Vec::new();
+        // argv indexes claimed by a companion; excluded from per-partition WHEREs.
+        let mut companion_claimed: std::collections::HashSet<i32> = std::collections::HashSet::new();
+
         let mut argv_index = 0;
         for mut constraint in index_info.constraints() {
-            if constraint.usable() && is_row_constraint(&constraint) {
-                constraint.set_argv_index(Some(argv_index));
-                constraint.set_omit(true);
-                argv_index += 1;
+            if !(constraint.usable() && is_row_constraint(&constraint)) {
+                continue;
             }
+            constraint.set_argv_index(Some(argv_index));
+            constraint.set_omit(true);
+            let argv_index_i32 = argv_index as i32;
+
+            let column_index = constraint.column() as usize;
+            if column_index < real_column_count {
+                let column_name = self.interface.columns().0[column_index].get_name();
+                if let Some(companion) = companions
+                    .iter()
+                    .find(|companion| companion.drives_scan(column_name, constraint.op()))
+                {
+                    if companion_scan.is_some() {
+                        return Err(sqlite3_ext::Error::Module(
+                            "Only one companion-driven scan per query is supported".to_string(),
+                        ));
+                    }
+                    companion_scan = Some(CompanionScanPlan {
+                        companion: companion.name().to_string(),
+                        driver: WhereClause::new(
+                            column_name.to_string(),
+                            constraint.op(),
+                            argv_index_i32,
+                        ),
+                        params: Vec::new(),
+                        order_by_hidden: None,
+                    });
+                    companion_claimed.insert(argv_index_i32);
+                } else if matches!(constraint.op(), ConstraintOp::Match) {
+                    return Err(sqlite3_ext::Error::Module(format!(
+                        "MATCH on column '{}' requires a scan-driving companion (e.g. companion vec USING vec0({} float[N]))",
+                        column_name, column_name
+                    )));
+                }
+            } else {
+                // Constraint on a companion's hidden column: a scan parameter.
+                let hidden_index = column_index - real_column_count;
+                match hidden_columns.get(hidden_index) {
+                    Some((companion_index, declaration))
+                        if companions[*companion_index]
+                            .scan_param(declaration.get_name(), constraint.op()) =>
+                    {
+                        scan_params.push((
+                            *companion_index,
+                            declaration.get_name().to_string(),
+                            WhereClause::new(
+                                declaration.get_name().to_string(),
+                                constraint.op(),
+                                argv_index_i32,
+                            ),
+                        ));
+                        companion_claimed.insert(argv_index_i32);
+                    }
+                    _ => {
+                        return Err(sqlite3_ext::Error::Module(format!(
+                            "Unsupported constraint on hidden column {}",
+                            hidden_columns
+                                .get(hidden_index)
+                                .map(|(_, declaration)| declaration.get_name().to_string())
+                                .unwrap_or_else(|| format!("#{}", column_index))
+                        )))
+                    }
+                }
+            }
+            argv_index += 1;
         }
-        let mut where_clauses = construct_where_clause(index_info, &self.interface)?;
+
+        if let Some(scan) = companion_scan.as_mut() {
+            let companion_index = companions
+                .iter()
+                .position(|companion| companion.name() == scan.companion)
+                .ok_or_else(|| sqlite3_ext::Error::Module("Companion not found".to_string()))?;
+            let (matching, stray): (Vec<_>, Vec<_>) = scan_params
+                .into_iter()
+                .partition(|(index, _, _)| *index == companion_index);
+            if !stray.is_empty() {
+                return Err(sqlite3_ext::Error::Module(
+                    "Scan parameters from multiple companions in one query are not supported"
+                        .to_string(),
+                ));
+            }
+            scan.params = matching
+                .into_iter()
+                .map(|(_, name, clause)| (name, clause))
+                .collect();
+        } else if !scan_params.is_empty() {
+            return Err(sqlite3_ext::Error::Module(format!(
+                "Constraint on hidden column '{}' requires a companion scan driver (e.g. a MATCH constraint)",
+                scan_params[0].1
+            )));
+        }
+
+        let mut where_clauses =
+            construct_where_clause(index_info, &self.interface, &companion_claimed)?;
         let partitions_where_clauses =
             where_clauses.get(self.interface.lookup().partition_table_column().get_name());
 
@@ -609,7 +729,7 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
         // partitions in order with each partition's rows ordered by that column yields a
         // globally sorted result. We can therefore consume a single-term ORDER BY on the
         // partition column.
-        let partition_order = {
+        let mut partition_order = {
             let order_terms: Vec<_> = index_info.order_by().collect();
             match order_terms.as_slice() {
                 [term] if term.column() == self.interface.partition_column_index() as i32 => {
@@ -622,16 +742,43 @@ impl<'vtab> VTab<'vtab> for PartitionMetaTable<'vtab> {
                 _ => None,
             }
         };
-        if partition_order.is_some() {
-            index_info.set_order_by_consumed(true);
-            // No external sort needed: drop the per-partition surcharge from the cost.
-            estimated_cost = estimated_rows as f64 / predicate_groups as f64;
+        if let Some(scan) = companion_scan.as_mut() {
+            // A companion-driven scan yields rows in the companion's own order
+            // (e.g. ascending distance) — partition ordering does not apply, but a
+            // single-term ascending ORDER BY on the companion's sorted hidden
+            // column is consumed instead.
+            partition_order = None;
+            let order_terms: Vec<_> = index_info.order_by().collect();
+            if let [term] = order_terms.as_slice() {
+                if !term.desc() && term.column() as usize >= real_column_count {
+                    let hidden_index = term.column() as usize - real_column_count;
+                    if let Some((companion_index, declaration)) = hidden_columns.get(hidden_index)
+                    {
+                        let companion = &companions[*companion_index];
+                        if companion.name() == scan.companion
+                            && companion.orders_scan_by(declaration.get_name())
+                        {
+                            index_info.set_order_by_consumed(true);
+                            scan.order_by_hidden = Some(declaration.get_name().to_string());
+                        }
+                    }
+                }
+            }
+            // The companion yields at most ~k rows from pruned partitions; signal a
+            // cheap scan so the planner prefers it.
+            index_info.set_estimated_rows(10);
+            index_info.set_estimated_cost(10.0);
+        } else {
+            if partition_order.is_some() {
+                index_info.set_order_by_consumed(true);
+                // No external sort needed: drop the per-partition surcharge from the cost.
+                estimated_cost = estimated_rows as f64 / predicate_groups as f64;
+            }
+            index_info.set_estimated_rows(estimated_rows);
+            index_info.set_estimated_cost(estimated_cost);
         }
 
-        index_info.set_estimated_rows(estimated_rows);
-        index_info.set_estimated_cost(estimated_cost);
-
-        let index_str = ron::to_string(&ScanPlan::new(where_clauses, partition_order))
+        let index_str = ron::to_string(&ScanPlan::new(where_clauses, partition_order, companion_scan))
             .map_err(|err| sqlite3_ext::Error::Module(err.to_string()))?;
         index_info.set_index_str(Some(&index_str))?;
 

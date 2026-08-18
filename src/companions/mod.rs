@@ -10,13 +10,16 @@ use std::fmt::Debug;
 use std::ops::IndexMut;
 
 use sqlite3_ext::params;
+use sqlite3_ext::vtab::ConstraintOp;
 use sqlite3_ext::Connection;
 use sqlite3_ext::FallibleIteratorMut;
 use sqlite3_ext::FromValue;
 use sqlite3_ext::Result as ExtResult;
+use sqlite3_ext::Value;
 use sqlite3_ext::ValueRef;
 
 use crate::error::TableError;
+use crate::ColumnDeclaration;
 use crate::ColumnDeclarations;
 
 use super::shadow_tables::interface::PendingRow;
@@ -67,6 +70,21 @@ impl CompanionDecl {
         }
         Ok(Some(CompanionDecl { name, module, args }))
     }
+}
+
+/// A row hit produced by a companion-driven scan.
+///
+/// The cursor resolves `prowid` inside the partition that owns
+/// `partition_value` and serves `hidden` for the companion's hidden columns
+/// (in [`Companion::hidden_columns`] declaration order).
+#[derive(Debug)]
+pub struct CompanionHit {
+    /// Partition value (start epoch) containing the row.
+    pub partition_value: i64,
+    /// Physical rowid of the row inside that partition.
+    pub prowid: i64,
+    /// Values for the companion's hidden columns, in declaration order.
+    pub hidden: Vec<Value>,
 }
 
 /// A partition-scoped companion shadow kept in sync with a partitioned table.
@@ -133,6 +151,54 @@ pub trait Companion: Debug {
         base_name: &str,
         partition_value: i64,
     ) -> ExtResult<()>;
+
+    /// Hidden columns appended to the vtab schema when this companion is
+    /// declared (vec: `k integer hidden`, `distance real hidden`). They exist
+    /// only on the virtual table, never on the physical partitions.
+    /// Default: none.
+    fn hidden_columns(&self) -> Vec<ColumnDeclaration> {
+        Vec::new()
+    }
+
+    /// Can this companion drive a scan from this constraint? vec: true for
+    /// `MATCH` on a synced (embedding) column. Checked before the generic
+    /// constraint path in `best_index`. Default: false.
+    fn drives_scan(&self, _column: &str, _op: ConstraintOp) -> bool {
+        false
+    }
+
+    /// Constraint ops this companion accepts on its OWN hidden columns as
+    /// scan parameters (vec: `=` on `k`). Default: none.
+    fn scan_param(&self, _hidden_column: &str, _op: ConstraintOp) -> bool {
+        false
+    }
+
+    /// Single-term ascending ORDER BY on this hidden column is already
+    /// satisfied by the companion's scan order (vec: `distance`).
+    /// Default: false.
+    fn orders_scan_by(&self, _hidden_column: &str) -> bool {
+        false
+    }
+
+    /// Execute the scan over the given (already partition-pruned) partitions.
+    ///
+    /// `driver` is the value of the constraint [`Self::drives_scan`] claimed;
+    /// `params` are the hidden-column values in [`Self::hidden_columns`]
+    /// order (`None` = unconstrained). Must return hits in final yield order
+    /// (vec: ascending distance, truncated to `k`).
+    fn scan(
+        &self,
+        _db: &Connection,
+        _base_name: &str,
+        _partitions: &[(i64, String)],
+        _driver: &ValueRef,
+        _params: &[Option<&ValueRef>],
+    ) -> ExtResult<Vec<CompanionHit>> {
+        Err(sqlite3_ext::Error::Module(format!(
+            "companion '{}' cannot drive scans",
+            self.name()
+        )))
+    }
 }
 
 /// Extracts the indices of main-schema columns referenced by a companion's

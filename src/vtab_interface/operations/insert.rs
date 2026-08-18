@@ -24,7 +24,9 @@ use crate::{shadow_tables::interface::VirtualTable, vtab_interface::*};
 /// This function is critical for ensuring that data is correctly inserted into the appropriate
 /// partition of a partitioned virtual table, adhering to the table's partitioning scheme.
 pub fn insert(interface: &VirtualTable, info: &mut ChangeInfo) -> sqlite3_ext::Result<i64> {
-    let columns = &info.args()[1..];
+    // SQLite passes one value per vtab column, including trailing companion-hidden
+    // columns (NULL on writes); strip them so only real columns reach the partitions.
+    let columns = &info.args()[1..1 + interface.real_column_count()];
     let partition_column = columns
         .get(interface.partition_column_index())
         .ok_or_else(|| {

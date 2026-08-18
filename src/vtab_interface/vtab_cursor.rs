@@ -4,13 +4,24 @@ use std::ops::{Bound, Deref, Index};
 use std::usize;
 
 use super::PartitionMetaTable;
-use crate::constraints::{Conditions, ScanPlan, SortDirection, WhereClauses};
+use crate::constraints::{CompanionScanPlan, Conditions, ScanPlan, SortDirection, WhereClauses};
 use crate::shadow_tables::{Partition, PartitionQuery};
 use crate::utils::aggregate_conditions_to_ranges;
 use sqlite3_ext::query::QueryResult;
 use sqlite3_ext::vtab::ColumnContext;
-use sqlite3_ext::{vtab::VTabCursor, ValueRef};
-use sqlite3_ext::{FromValue, Result as ExtResult};
+use sqlite3_ext::{vtab::VTabCursor, FallibleIteratorMut, Value, ValueRef};
+use sqlite3_ext::{query::ToParam, FromValue, Result as ExtResult};
+
+/// A fully materialized row produced by a companion-driven scan.
+///
+/// `values[0]` is the physical rowid inside `partition_name`; the remaining
+/// values are the real columns followed by the companion's hidden columns, so
+/// `column(idx)` can serve `values[idx + 1]` uniformly.
+#[derive(Debug)]
+struct ScanRow {
+    partition_name: String,
+    values: Vec<Value>,
+}
 
 /// Represents a cursor for iterating over partitioned data in a virtual table.
 ///
@@ -26,6 +37,10 @@ pub struct RangePartitionCursor<'vtab> {
     pub prepared_partitions: std::vec::IntoIter<Partition>,
     /// The current partition under iteration by the cursor.
     pub current_partition: Option<Partition>,
+    /// Rows materialized by a companion-driven scan, in yield order.
+    scan_rows: Option<std::vec::IntoIter<ScanRow>>,
+    /// The current scan row (companion-driven scans only).
+    current_scan_row: Option<ScanRow>,
     /// Indicates whether the cursor has reached the end of available data.
     pub eof: bool,
 }
@@ -45,6 +60,8 @@ impl<'vtab> RangePartitionCursor<'vtab> {
             internal_rowid_counter: i64::default(),
             prepared_partitions: std::vec::IntoIter::default(),
             current_partition: None,
+            scan_rows: None,
+            current_scan_row: None,
             eof: false,
         }
     }
@@ -181,6 +198,157 @@ impl<'vtab> RangePartitionCursor<'vtab> {
 
         Ok(partition_iter)
     }
+
+    /// Runs a companion-driven scan: prune partitions via the lookup conditions,
+    /// let the companion produce row hits, and materialize the hit rows.
+    ///
+    /// The remaining row-level conditions (partition-column predicates that cut
+    /// inside a partition, or filters on other columns) are applied to the row
+    /// fetch — best_index promised SQLite (omit=true) that xFilter enforces them.
+    fn initialize_companion_scan(
+        &mut self,
+        scan_plan: CompanionScanPlan,
+        lookup_conditions: Option<&Conditions>,
+        partition_conditions: Option<&Conditions>,
+        args: &[&mut ValueRef],
+    ) -> ExtResult<()> {
+        let ranges = lookup_conditions
+            .zip(Some(self.meta_table.interface.partition_interval()))
+            .map(|(conditions, interval)| {
+                aggregate_conditions_to_ranges(conditions.as_slice(), interval)
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let (lower_bound, upper_bound) = ranges
+            .get("partition_value")
+            .unwrap_or(&(Bound::Unbounded, Bound::Unbounded));
+        let partitions = self.get_partitions_to_query(lower_bound, upper_bound)?;
+
+        let companion = self
+            .meta_table
+            .interface
+            .companions()
+            .iter()
+            .find(|companion| companion.name() == scan_plan.companion)
+            .ok_or_else(|| {
+                sqlite3_ext::Error::Module(format!(
+                    "Companion '{}' not found",
+                    scan_plan.companion
+                ))
+            })?;
+
+        let arg_at = |index: i32| -> ExtResult<&ValueRef> {
+            args.get(index as usize).map(|value| &**value).ok_or_else(|| {
+                sqlite3_ext::Error::Module(format!(
+                    "Missing argument for constraint index {}",
+                    index
+                ))
+            })
+        };
+        let driver = arg_at(scan_plan.driver.get_constraint_index())?;
+
+        // Scan parameters in the companion's hidden-column declaration order.
+        let hidden_columns = companion.hidden_columns();
+        let mut params: Vec<Option<&ValueRef>> = vec![None; hidden_columns.len()];
+        for (name, clause) in &scan_plan.params {
+            if let Some(position) = hidden_columns
+                .iter()
+                .position(|declaration| declaration.get_name() == name)
+            {
+                params[position] = Some(arg_at(clause.get_constraint_index())?);
+            }
+        }
+
+        let hits = companion.scan(
+            self.meta_table.connection,
+            self.meta_table.interface.base_name(),
+            &partitions,
+            driver,
+            &params,
+        )?;
+
+        let partition_names: HashMap<i64, &str> = partitions
+            .iter()
+            .map(|(value, name)| (*value, name.as_str()))
+            .collect();
+        let real_column_count = self.meta_table.interface.real_column_count();
+        let condition_clause = partition_conditions.map(|conditions| {
+            conditions
+                .as_slice()
+                .iter()
+                .map(|condition| {
+                    format!(
+                        "{} {} ?",
+                        condition.column,
+                        crate::ConstraintOpDef::from(*condition.operator)
+                    )
+                })
+                .collect::<Vec<String>>()
+                .join(" AND ")
+        });
+        let mut rows = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let partition_name = partition_names
+                .get(&hit.partition_value)
+                .ok_or_else(|| {
+                    sqlite3_ext::Error::Module(format!(
+                        "Companion returned hit for unknown partition value {}",
+                        hit.partition_value
+                    ))
+                })?
+                .to_string();
+            let sql = match &condition_clause {
+                Some(clause) => format!(
+                    "SELECT rowid, * FROM {} WHERE rowid = ? AND {}",
+                    partition_name, clause
+                ),
+                None => format!("SELECT rowid, * FROM {} WHERE rowid = ?", partition_name),
+            };
+            let mut stmt = self.meta_table.connection.prepare(&sql).map_err(|err| {
+                sqlite3_ext::Error::Module(format!("row fetch prepare: {}", err))
+            })?;
+            hit.prowid.bind_param(&mut stmt, 1).map_err(|err| {
+                sqlite3_ext::Error::Module(format!("row fetch bind: {}", err))
+            })?;
+            if let Some(conditions) = partition_conditions {
+                for (index, condition) in conditions.as_slice().iter().enumerate() {
+                    condition
+                        .value
+                        .bind_param(&mut stmt, (index + 2) as i32)
+                        .map_err(|err| {
+                            sqlite3_ext::Error::Module(format!("row fetch bind: {}", err))
+                        })?;
+                }
+            }
+            let query_rows = stmt.query(()).map_err(|err| {
+                sqlite3_ext::Error::Module(format!("row fetch query: {}", err))
+            })?;
+            // A hit whose row no longer matches the row-level conditions is
+            // dropped from the result.
+            let Some(row) = query_rows.next().map_err(|err| {
+                sqlite3_ext::Error::Module(format!("row fetch step: {}", err))
+            })? else {
+                continue;
+            };
+            let mut values = Vec::with_capacity(real_column_count + 1 + hit.hidden.len());
+            for index in 0..=real_column_count {
+                values.push(FromValue::to_owned(row.index(index))?);
+            }
+            values.extend(hit.hidden);
+            rows.push(ScanRow {
+                partition_name,
+                values,
+            });
+        }
+
+        let mut scan_rows = rows.into_iter();
+        self.current_scan_row = scan_rows.next();
+        if self.current_scan_row.is_none() {
+            self.eof = true;
+        }
+        self.scan_rows = Some(scan_rows);
+        Ok(())
+    }
 }
 
 impl<'vtab> VTabCursor for RangePartitionCursor<'vtab> {
@@ -206,9 +374,11 @@ impl<'vtab> VTabCursor for RangePartitionCursor<'vtab> {
     ) -> ExtResult<()> {
         self.meta_table.interface.flush_all()?;
         self.eof = false;
+        self.scan_rows = None;
+        self.current_scan_row = None;
         let scan_plan_serialized = idx_str.unwrap_or("");
         let scan_plan: ScanPlan = if scan_plan_serialized.is_empty() {
-            ScanPlan::new(WhereClauses(HashMap::default()), None)
+            ScanPlan::new(WhereClauses(HashMap::default()), None, None)
         } else {
             ron::from_str(scan_plan_serialized)
                 .map_err(|err| sqlite3_ext::Error::Module(err.to_string()))?
@@ -225,6 +395,19 @@ impl<'vtab> VTabCursor for RangePartitionCursor<'vtab> {
             .map(|where_clauses| Conditions::try_from((where_clauses, args.deref())))
             .transpose()
             .map_err(|err| sqlite3_ext::Error::Module(err.to_string()))?;
+
+        if let Some(companion_scan) = scan_plan.companion_scan {
+            return self
+                .initialize_companion_scan(
+                    companion_scan,
+                    lookup_conditions.as_ref(),
+                    partition_conditions.as_ref(),
+                    args,
+                )
+                .map_err(|err| {
+                    sqlite3_ext::Error::Module(format!("companion scan init: {}", err))
+                });
+        }
 
         self.prepared_partitions = self.initialize_partitions(
             partition_conditions.as_ref(),
@@ -243,6 +426,16 @@ impl<'vtab> VTabCursor for RangePartitionCursor<'vtab> {
     ///
     /// A `Result<(), Error>` indicating the success or failure of advancing the cursor.
     fn next(&mut self) -> ExtResult<()> {
+        // Companion-driven scan: walk the materialized hit rows.
+        if let Some(scan_rows) = self.scan_rows.as_mut() {
+            self.current_scan_row = scan_rows.next();
+            if self.current_scan_row.is_some() {
+                self.internal_rowid_counter += 1;
+            } else {
+                self.eof = true;
+            }
+            return Ok(());
+        }
         // Advance row-by-row, skipping partitions whose filtered query yields no rows.
         loop {
             if self.advance_to_next_row()?.is_some() {
@@ -275,8 +468,20 @@ impl<'vtab> VTabCursor for RangePartitionCursor<'vtab> {
     ///
     /// A `Result<(), Error>` indicating the success or failure of the column retrieval operation.
     fn column(&mut self, idx: usize, c: &ColumnContext) -> ExtResult<()> {
+        if let Some(scan_row) = self.current_scan_row.as_ref() {
+            if let Some(value) = scan_row.values.get(idx + 1) {
+                c.set_result(value.clone())?;
+            }
+            return Ok(());
+        }
         if let Some(current_row) = self.get_current_row() {
-            c.set_result(current_row.index(idx + 1).as_ref())?
+            // Partition rows carry only real columns; companion-hidden columns
+            // (trailing) read as NULL on ordinary scans.
+            if idx + 1 < current_row.len() {
+                c.set_result(current_row.index(idx + 1).as_ref())?;
+            } else {
+                c.set_result(Value::Null)?;
+            }
         };
 
         Ok(())
@@ -287,17 +492,25 @@ impl<'vtab> VTabCursor for RangePartitionCursor<'vtab> {
     /// # Returns
     /// The row ID or an error if it cannot be retrieved.
     fn rowid(&mut self) -> ExtResult<i64> {
-        let rowid_column = self.get_current_row().map(|row| row.index(0));
-        let partition_name = match self.get_current_partition() {
-            Some(partition) => partition.get_name(),
-            None => {
-                return Err(sqlite3_ext::Error::Sqlite(
-                    1,
-                    Some("Could not access current partition".to_owned()),
-                ))
+        let entry = if let Some(scan_row) = self.current_scan_row.as_ref() {
+            match scan_row.values.first() {
+                Some(Value::Integer(prowid)) => Some((*prowid, scan_row.partition_name.clone())),
+                _ => None,
             }
+        } else {
+            let rowid_column = self.get_current_row().map(|row| row.index(0));
+            let partition_name = match self.get_current_partition() {
+                Some(partition) => partition.get_name(),
+                None => {
+                    return Err(sqlite3_ext::Error::Sqlite(
+                        1,
+                        Some("Could not access current partition".to_owned()),
+                    ))
+                }
+            };
+            rowid_column.map(|column| (column.get_i64(), partition_name.to_string()))
         };
-        if let Some(column) = rowid_column {
+        if let Some(entry) = entry {
             let mut rowid_mapper = self.meta_table.rowid_mapper.write().map_err(|e| {
                 sqlite3_ext::Error::Sqlite(1, Some(format!("Lock acquisition failed: {}", e)))
             })?;
@@ -305,7 +518,6 @@ impl<'vtab> VTabCursor for RangePartitionCursor<'vtab> {
             // indexed by counter — no hashing. Overwrite on revisit (e.g. re-filtered
             // cursor), append otherwise.
             let idx = self.internal_rowid_counter as usize;
-            let entry = (column.get_i64(), partition_name.to_string());
             match rowid_mapper.get_mut(idx) {
                 Some(slot) => *slot = entry,
                 None => rowid_mapper.push(entry),

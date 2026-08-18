@@ -112,16 +112,20 @@ fn partition_aligned_bounds(
 ///
 /// This function parses the index information to generate SQL WHERE clauses that are
 /// applicable for querying the virtual table, based on its column constraints and indexes.
+/// Constraints whose argv index appears in `skip` (claimed by a companion-driven
+/// scan) are excluded — the companion enforces them itself.
 ///
 /// Parameters:
 /// - `index_info`: Index information provided by the SQLite VTAB method bestIndex.
 /// - `virtual_table`: Reference to the `VirtualTable`.
+/// - `skip`: argv indexes of constraints claimed by companions.
 ///
 /// Returns:
 /// - A result containing `WhereClauses` if successful, or an error on failure.
 fn construct_where_clause(
     index_info: &sqlite3_ext::vtab::IndexInfo,
     virtual_table: &VirtualTable,
+    skip: &std::collections::HashSet<i32>,
 ) -> ExtResult<WhereClauses> {
     let mut column_name_map: HashMap<String, Vec<(IndexInfoConstraint, i32)>> = HashMap::new();
     // Index must match the argv_index assigned in best_index: a sequential counter over
@@ -133,6 +137,9 @@ fn construct_where_clause(
     {
         let index = argv_index;
         argv_index += 1;
+        if skip.contains(&index) {
+            continue;
+        }
         let column_name = virtual_table.columns().0[constraint.column() as usize]
             .get_name()
             .to_owned();
