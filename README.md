@@ -274,10 +274,11 @@ Apache 2.0. See [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-- [sqlite3_ext](https://github.com/CGamesPlay/sqlite3_ext) — the Rust bindings
-  this extension is built on.
-- [sqlite-vec](https://github.com/asg017/sqlite-vec) by Alex Garcia — the
-  vector search extension that powers the experimental vec companion. The
-  partitioner never reimplements vector search; it delegates to vec0 and
-  composes with it. If you use the vec companion, sqlite-vec is doing the heavy
-  lifting and deserves the credit.
+- [sqlite3_ext](https://github.com/CGamesPlay/sqlite3_ext) by
+  [CGamesPlay](https://github.com/CGamesPlay) — the Rust bindings this
+  extension is built on. The entire virtual table interface goes through them.
+- [sqlite-vec](https://github.com/asg017/sqlite-vec) by
+  [asg017](https://github.com/asg017) — the vector search extension that
+  powers the experimental vec companion. The partitioner never reimplements
+  vector search; it delegates to vec0 and composes with it. If you use the vec
+  companion, sqlite-vec is doing the heavy lifting and deserves the credit.
