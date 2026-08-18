@@ -1040,6 +1040,45 @@ mod vec_bench {
         Ok(hits.len())
     }
 
+    /// The pure-SQL path: KNN driven by the companion through the partitioned
+    /// vtab itself. Row resolution is built in (the vtab serves full rows), so
+    /// this is comparable to merge+resolve above.
+    fn vtab_knn(
+        db: &Connection,
+        query_vector: &str,
+        k: usize,
+        window: Option<(&str, &str)>,
+    ) -> sqlite3_ext::Result<usize> {
+        let sql = match window {
+            Some((start, end)) => format!(
+                "SELECT col2, distance FROM partitioned
+                 WHERE emb MATCH ? AND k = {k}
+                   AND col1 >= '{start}' AND col1 < '{end}'
+                 ORDER BY distance"
+            ),
+            None => format!(
+                "SELECT col2, distance FROM partitioned
+                 WHERE emb MATCH ? AND k = {k} ORDER BY distance"
+            ),
+        };
+        let mut stmt = db.prepare(&sql)?;
+        query_vector.bind_param(&mut stmt, 1)?;
+        let rows = stmt.query(())?;
+        let mut hits = 0;
+        loop {
+            match rows.next() {
+                Ok(Some(row)) => {
+                    let _: String = row[0].get_str()?.to_owned();
+                    let _: f64 = row[1].get_f64();
+                    hits += 1;
+                }
+                Ok(None) => break,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(hits)
+    }
+
     #[test]
     #[ignore = "manual benchmark; run with cargo test --features vec benchmark_partitioned_vec_companion -- --ignored --nocapture"]
     fn benchmark_partitioned_vec_companion_vs_plain() -> sqlite3_ext::Result<()> {
@@ -1194,6 +1233,36 @@ mod vec_bench {
             assert_eq!(resolved, K);
             start.elapsed()
         };
+
+        // Pure-SQL vtab path (companion-driven scan), same three shapes.
+        let vtab_local_knn = {
+            let start = Instant::now();
+            let hits = vtab_knn(
+                db,
+                query_vector.as_str(),
+                K,
+                Some((&local_start, &local_end)),
+            )?;
+            assert_eq!(hits, K);
+            start.elapsed()
+        };
+        let vtab_global_knn = {
+            let start = Instant::now();
+            let hits = vtab_knn(db, query_vector.as_str(), K, None)?;
+            assert_eq!(hits, K);
+            start.elapsed()
+        };
+        let vtab_window_knn = {
+            let start = Instant::now();
+            let hits = vtab_knn(
+                db,
+                query_vector.as_str(),
+                K,
+                Some((&window_start, &window_end)),
+            )?;
+            assert_eq!(hits, K);
+            start.elapsed()
+        };
         eprintln!("vec benchmark: KNN phases complete");
 
         let (delete_start, delete_end) = workload.delete_window();
@@ -1256,6 +1325,10 @@ mod vec_bench {
         println!(
             "windowed knn k={K}: partitioned merge across {} partitions={:?} | plain global index with time filter={:?}",
             window_partitions.len(), partitioned_window_knn, plain_window_knn
+        );
+        println!(
+            "vtab one-liner knn k={K} (rows resolved inline): local={:?} | global={:?} | windowed={:?}",
+            vtab_local_knn, vtab_global_knn, vtab_window_knn
         );
         println!(
             "retention (one data/vector partition): partitioned drop-pair={:?} | plain vector+row delete={:?}",

@@ -98,3 +98,48 @@ PARTITIONER_BENCH_MINUTES=10080 \
 ```
 
 Raw logs: `benchmark-results/*.log` (see `run_campaign.sh`).
+
+## Vector companion (sqlite-vec), 2026-08-18
+
+Commit `af5b95b` (companion-driven scans). Workload: 1000 rows/min × 1440 min =
+**1 440 000 rows** (hourly partitions, 24 pairs), dim-64 vectors, k=10. Three
+contestants: the pure-SQL vtab one-liner (`WHERE emb MATCH ? AND k = 10 [AND
+col1 window] ORDER BY distance`), hand-merged per-partition KNN + row
+resolution, and a plain table with a manually synced global vec0 index.
+
+| Query (memory) | vtab one-liner | Hand-merge | Plain global vec0 |
+|---|---|---|---|
+| Local KNN (1 partition) | 1.69ms | 1.65ms | 36.1ms |
+| Global KNN (no time filter) | 37.7ms | 38.0ms | 36.1ms |
+| Windowed KNN (2h) | **3.23ms** | 3.16ms | 109.2ms |
+
+| Query (disk) | vtab one-liner | Hand-merge | Plain global vec0 |
+|---|---|---|---|
+| Local KNN (1 partition) | 5.06ms | 5.00ms | 114.0ms |
+| Global KNN (no time filter) | 115.3ms | 116.6ms | 114.0ms |
+| Windowed KNN (2h) | **9.59ms** | 9.66ms | 192.1ms |
+
+Retention (one partition pair): partitioned drop 5.3ms memory / 15.3ms disk vs
+853ms / 1.06s of ranged vector+row deletes on the plain schema (~60-160×).
+
+Takeaways:
+
+- The SQL-native vtab path matches the hand-written merge within noise (~1-3%)
+  at every shape, in both storage modes — and it resolves full rows inline,
+  which the hand-merge pays for on top.
+- Windowed KNN (the target workload: similarity + time range) is **~34×
+  (memory) / ~20× (disk)** faster than a global vec0 index with a rowid filter.
+- Global KNN at this scale is parity even on disk (the earlier 2.88M-row sweep
+  showed partitioned slower on disk there; check `vec_partitioned_sweep_*` logs
+  before claiming parity at larger scales).
+
+Reproduce:
+
+```sh
+VEC0_EXTENSION_PATH=/path/to/vec0 PARTITIONER_BENCH_MINUTES=1440 \
+PARTITIONER_BENCH_STORAGE={memory,disk} \
+  cargo test --features vec benchmark_partitioned_vec_companion_vs_plain \
+  -- --ignored --nocapture
+```
+
+Raw logs: `benchmark-results/vtab_knn_1440000_{memory,disk}.log`.

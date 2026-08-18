@@ -1,0 +1,27 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on shared package cache
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [optimized] target(s) in 0.09s
+     Running unittests src/lib.rs (target/debug/build/sqlite3-partitioner/d534b55d42f6f68b/out/partitioner-d534b55d42f6f68b)
+
+running 1 test
+vec benchmark: inserting plain rows
+vec benchmark: inserting partitioned rows
+test benchmarks::vec_bench::benchmark_partitioned_vec_companion_vs_plain has been running for over 60 seconds
+vec benchmark: ingest complete
+vec benchmark: KNN phases complete
+vec benchmark: retention complete
+storage=memory dim=64 workload=1000 rows/minute for 1440 minutes (1440000 total rows)
+ingest: partitioned+partition-local-vec=40.245295s | plain+global-vec=35.97355025s
+vector partitions=24 vector rows: partitioned=1440000 plain=1440000
+knn k=10: one partition+resolve=1.650458ms | plain global+resolve=36.102458ms
+global knn k=10 (no time filter): partitioned merge across all 24 partitions=37.968417ms | plain global=36.102458ms
+windowed knn k=10: partitioned merge across 2 partitions=3.158666ms | plain global index with time filter=109.206875ms
+vtab one-liner knn k=10 (rows resolved inline): local=1.691958ms | global=37.739125ms | windowed=3.231125ms
+retention (one data/vector partition): partitioned drop-pair=5.326041ms | plain vector+row delete=853.066917ms
+vec benchmark: destroying partitioned table
+test benchmarks::vec_bench::benchmark_partitioned_vec_companion_vs_plain ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 78.37s
+
