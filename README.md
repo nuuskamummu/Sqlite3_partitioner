@@ -34,6 +34,17 @@ Partitioned vs. a plain table with an equivalent schema and indexes
 | Remove 60 000 old rows | 3.3 ms (`DROP TABLE`) | 32.2 ms (ranged `DELETE`) | **~10× faster** |
 | `partitioner_count_between` over 10.08M rows | ~0.4 ms | — | **~8× faster** than plain count |
 
+With the experimental [vec companion](#companions-experimental-feature-gated)
+(1.44M rows, dim-64 vectors, k=10; "plain" = plain table + manually synced
+global [sqlite-vec](https://github.com/asg017/sqlite-vec) index):
+
+| Workload | Partitioned + vec companion | Plain + vec0 | Result |
+|:---------|----------------------------:|-------------:|:-------|
+| Windowed KNN (2h range), in-memory | 3.2 ms | 109.2 ms | **~34× faster** |
+| Windowed KNN (2h range), on-disk | 9.6 ms | 192.1 ms | **~20× faster** |
+| Global KNN (no time filter), in-memory | 37.7 ms | 36.1 ms | parity |
+| Expire vectors with their rows | ~5 ms (`DROP TABLE` pair) | 0.9–1.1 s (ranged deletes) | **~60–160× faster** |
+
 Retention is roughly constant in partition size while a ranged `DELETE` is
 O(rows), so the gap grows with partition size. Ad-hoc queries that don't
 constrain the partition column run at parity to somewhat slower — see
